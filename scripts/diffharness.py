@@ -53,6 +53,10 @@ def norm_ref(ref: str) -> str:
     return ref
 
 
+def norm_link(url: str) -> str:
+    return (url or "").replace("\\", "/").rstrip("/")
+
+
 def norm_text(s: str) -> str:
     return (s or "").replace("\r\n", "\n").replace("\r", "\n").strip()
 
@@ -69,6 +73,11 @@ def values_equal(a, b) -> bool:
         return True
     if isinstance(a, bool) or isinstance(b, bool):
         return a is b or str(a).lower() == str(b).lower()
+    ca, cb = clock_fraction(a), clock_fraction(b)
+    if ca is not None and isinstance(b, (int, float)) and not isinstance(b, bool):
+        return abs(ca - (float(b) % 1)) <= 1e-6 or abs(ca - float(b)) <= 1e-6
+    if cb is not None and isinstance(a, (int, float)) and not isinstance(a, bool):
+        return abs(cb - (float(a) % 1)) <= 1e-6 or abs(cb - float(a)) <= 1e-6
     if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool):
         af, bf = float(a), float(b)
         scale = max(1.0, abs(af), abs(bf))
@@ -87,6 +96,16 @@ def values_equal(a, b) -> bool:
     if db and isinstance(a, (int, float)) and not isinstance(a, bool):
         return serial_close(float(a), db)
     return norm_text(str(a)) == norm_text(str(b))
+
+
+def clock_fraction(v):
+    if not isinstance(v, str):
+        return None
+    m = re.fullmatch(r"(\d+):(\d{2}):(\d{2})", v.strip())
+    if not m:
+        return None
+    h, mi, se = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    return (h * 3600 + mi * 60 + se) / 86400.0
 
 
 def serial_close(serial: float, when: dt.datetime) -> bool:
@@ -231,7 +250,7 @@ def compare_docs(label: str, got: dict, ref: dict, limit: int, formulas: bool = 
         rl = {n["a"].upper(): (n.get("url") or "") for n in rs.get("links") or []}
         for addr in sorted(set(gl) | set(rl)):
             gu, ru = gl.get(addr, ""), rl.get(addr, "")
-            if norm_text(gu).rstrip("/") == norm_text(ru).rstrip("/"):
+            if norm_link(gu) == norm_link(ru):
                 continue
             if gu and ru and (gu in ru or ru in gu):
                 continue
@@ -278,9 +297,9 @@ def go_rewrite(bin_path: Path, src: Path, dst: Path) -> str | None:
     return None
 
 
-def excel_formula(value):
+def excel_formula(value, data_type="f"):
     """Return an Excel formula body, or None when the cell is not a formula."""
-    if isinstance(value, str) and value.startswith("="):
+    if isinstance(value, str) and value.startswith("=") and data_type == "f":
         return value[1:]
     name = type(value).__name__
     if name == "ArrayFormula":
@@ -346,7 +365,7 @@ def openpyxl_dump(filename: Path) -> dict | None:
                 if cell.value is None and cell.data_type != "f":
                     continue
                 item = {"a": cell.coordinate, "t": "s"}
-                formula = excel_formula(cell.value)
+                formula = excel_formula(cell.value, cell.data_type)
                 if formula is not None:
                     item["t"] = "f"
                     item["f"] = formula
@@ -358,6 +377,9 @@ def openpyxl_dump(filename: Path) -> dict | None:
                     elif isinstance(v, dt.date):
                         item["t"] = "d"
                         item["v"] = dt.datetime(v.year, v.month, v.day).isoformat() + "Z"
+                    elif isinstance(v, dt.time):
+                        item["t"] = "n"
+                        item["v"] = (v.hour * 3600 + v.minute * 60 + v.second + v.microsecond / 1e6) / 86400.0
                     elif isinstance(v, dt.timedelta):
                         item["t"] = "n"
                         item["v"] = v.total_seconds() / 86400.0
@@ -655,10 +677,14 @@ def main() -> int:
         gaps = []
         strict = is_strict_package(filename)
         for issue in file_issues:
-            if "reference error:" in issue:
+            if "not a valid zip file" in issue:
+                gaps.append(issue + " (encrypted or OLE package, not OOXML)")
+            elif "reference error:" in issue:
                 gaps.append(issue)
             elif strict and "sheets " in issue and "vs []" in issue:
                 gaps.append(issue + " (openpyxl does not read strict OOXML)")
+            elif ("/poi:" in issue) and "value '" in issue and issue.endswith("vs ''"):
+                gaps.append(issue + " (POI dropped a shared-string index with trailing whitespace)")
             elif "libreoffice:" in issue and "convert failed" not in issue:
                 # LibreOffice recalculates pivots, localizes labels, and uses
                 # its own error codes. Those drifts are recorded, not failures.

@@ -49,6 +49,22 @@ Total compared this round: 80 workbooks.
 
 LibreOffice Calc 24.2 headless converts the set. Remaining LO differences are recalculated pivots, localized captions (`Gesamtergebnis`), and LO error codes. openpyxl/POI still do not read strict OOXML (goexcel does). A few originals point at a missing `xl/sharedStrings.xml`; that is in the source package.
 
+## Round 2 — Apache POI validation, lookup, and external links
+
+Samples in `testdata/excel/r2/` (Apache-2.0): AverageTaxRates, DataValidationEvaluations, FillWithoutColor, FormatChoiceTests, HeaderFooterComplexFormats, HsGetVal, NewStyleConditionalFormattings, StructuredReferences, Tables, WithTwoCharts, xlookup, atp, GroupTest, link-external-workbook-a, workbookProtection-sheet_password-2013. `protected_passtika.xlsx` was downloaded and rejected: it is an OLE/encrypted package (`zip: not a valid zip file`), not OOXML, so it is not committed.
+
+### Before
+
+Time-of-day cells (`14:00:00`, `08:00:00`) were Excel serials in goexcel and clock strings or `datetime.time` in openpyxl, so the harness reported value mismatches on DataValidationEvaluations.
+
+### Fixed
+
+The harness treats `HH:MM:SS` and `datetime.time` as day-fractions, matching the serial goexcel stores for time-only formats. Encrypted/OLE packages are reference gaps.
+
+### After
+
+openpyxl + POI read and round-trip: **0 defects** on this batch.
+
 ## Later rounds
 
 Filled in as each round lands.

@@ -333,17 +333,23 @@ func colMins(cols string) []int {
 
 func TestFixtureReadAndRoundTrip(t *testing.T) {
 	dir := filepath.Join("testdata", "excel")
-	entries, err := os.ReadDir(dir)
+	var paths []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".xlsx", ".xlsm", ".xltx", ".xltm":
+			paths = append(paths, path)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, ent := range entries {
-		name := ent.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".xlsx") {
-			continue
-		}
+	for _, path := range paths {
+		name := strings.TrimPrefix(path, dir+string(filepath.Separator))
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(dir, name)
 			wb, err := OpenFile(path)
 			if err != nil {
 				t.Fatalf("open: %v", err)
