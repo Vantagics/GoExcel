@@ -95,6 +95,7 @@ func (r *XLSXReader) Read(reader io.ReaderAt, size int64) (*Workbook, error) {
 			return nil, fmt.Errorf("reading sheet %q: %w", ws.title, fmt.Errorf("file %q not found in archive", ws.partName))
 		}
 		if root := rootLocalName(data); root != "" && root != "worksheet" {
+			ws.kind = root
 			ws.rawPart = append([]byte(nil), data...)
 			if ctData, ok := pkg.file("[Content_Types].xml"); ok {
 				ws.rawContentType = parseContentTypes(ctData).overrideFor(ws.partName)
@@ -410,13 +411,14 @@ func parseSheets(dec *xml.Decoder, wb *Workbook) error {
 				name := attrLocal(t, "name")
 				rid := attrLocal(t, "id")
 				state := attrLocal(t, "state")
-				if _, ok := relByID(wb.workbookRels, rid); ok {
+				if rel, ok := relByID(wb.workbookRels, rid); ok {
 					ws, err := wb.AddSheet(name)
 					if err != nil {
 						return err
 					}
 					ws.relID = rid
-					ws.partName = resolvePart("xl/workbook.xml", relByIDMust(wb.workbookRels, rid).Target)
+					ws.relType = rel.Type
+					ws.partName = resolvePart("xl/workbook.xml", rel.Target)
 					if state == "hidden" || state == "veryHidden" {
 						ws.state = state
 					}
@@ -569,10 +571,37 @@ func isColLetters(s string) bool {
 // built-in Excel date/time format.
 // Built-in date format IDs: 14-22, 27-36, 45-47, 50-58.
 func isDateFormatID(id int) bool {
+	if isTimeOnlyFormatID(id) {
+		return false
+	}
 	return (id >= 14 && id <= 22) ||
 		(id >= 27 && id <= 36) ||
 		(id >= 45 && id <= 47) ||
 		(id >= 50 && id <= 58)
+}
+
+// isTimeOnlyFormatID reports built-in formats that are times or elapsed
+// durations (h:mm, mm:ss, [h]:mm:ss) rather than calendar dates.
+func isTimeOnlyFormatID(id int) bool {
+	return (id >= 18 && id <= 21) || (id >= 45 && id <= 47)
+}
+
+// isTimeOnlyFormat reports custom formats such as h:mm:ss or [h]:mm:ss.
+// Calendar formats that also contain a time (yyyy-mm-dd hh:mm) are dates.
+func isTimeOnlyFormat(code string) bool {
+	if code == "" {
+		return false
+	}
+	cleaned := stripBracketedExceptElapsed(stripQuotedAndEscaped(strings.ToLower(code)))
+	if strings.ContainsAny(cleaned, "yd") || strings.Contains(cleaned, "mmm") {
+		return false
+	}
+	if strings.ContainsAny(cleaned, "hs") {
+		return true
+	}
+	// Elapsed minutes, written [m] or [mm]. A bare "m" is a month.
+	lower := strings.ToLower(code)
+	return strings.Contains(lower, "[m]") || strings.Contains(lower, "[mm]")
 }
 
 // looksLikeDateFormat checks if a custom format code string contains

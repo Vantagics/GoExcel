@@ -209,8 +209,13 @@ func planSheet(wb *Workbook, ws *Worksheet, index int) sheetPlan {
 		if plan.contentType == "" {
 			plan.contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml"
 		}
-		plan.relType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet"
-		if strings.Contains(plan.contentType, "worksheet") {
+		if ws.relType != "" {
+			plan.relType = ws.relType
+		} else if strings.Contains(strings.ToLower(plan.contentType), "chartsheet") {
+			plan.relType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet"
+		} else if strings.Contains(strings.ToLower(plan.contentType), "dialogsheet") {
+			plan.relType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/dialogsheet"
+		} else {
 			plan.relType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
 		}
 		plan.relsName = relsPathFor(plan.partName)
@@ -1040,6 +1045,35 @@ func writeCell(b *strings.Builder, wb *Workbook, c *Cell, sst *sstTable, reg *st
 }
 
 func writeFormulaCell(b *strings.Builder, wb *Workbook, c *Cell) {
+	if c.dt != nil {
+		if c.cachedType == "str" || c.cachedType == "e" || c.cachedType == "b" {
+			fmt.Fprintf(b, ` t="%s"`, c.cachedType)
+		}
+		b.WriteString(`><f t="dataTable"`)
+		if c.dt.Ref != "" {
+			fmt.Fprintf(b, ` ref="%s"`, xmlText(c.dt.Ref))
+		}
+		if c.dt.TwoD {
+			b.WriteString(` dt2D="1"`)
+		} else {
+			b.WriteString(` dt2D="0"`)
+		}
+		if c.dt.Row {
+			b.WriteString(` dtr="1"`)
+		} else {
+			b.WriteString(` dtr="0"`)
+		}
+		if c.dt.R1 != "" {
+			fmt.Fprintf(b, ` r1="%s"`, xmlText(c.dt.R1))
+		}
+		if c.dt.R2 != "" {
+			fmt.Fprintf(b, ` r2="%s"`, xmlText(c.dt.R2))
+		}
+		b.WriteString(`/>`)
+		writeCachedValue(b, wb, c)
+		b.WriteString(`</c>`)
+		return
+	}
 	formula := strings.TrimSpace(c.Formula)
 	if strings.HasPrefix(formula, "=") {
 		formula = strings.TrimPrefix(formula, "=")
@@ -1070,6 +1104,11 @@ func writeFormulaCell(b *strings.Builder, wb *Workbook, c *Cell) {
 	b.WriteByte('>')
 	b.WriteString(xmlText(formula))
 	b.WriteString(`</f>`)
+	writeCachedValue(b, wb, c)
+	b.WriteString(`</c>`)
+}
+
+func writeCachedValue(b *strings.Builder, wb *Workbook, c *Cell) {
 	switch v := c.Value.(type) {
 	case float64:
 		fmt.Fprintf(b, `<v>%s</v>`, formatNumber(v))
@@ -1086,7 +1125,6 @@ func writeFormulaCell(b *strings.Builder, wb *Workbook, c *Cell) {
 			fmt.Fprintf(b, `<v>%s</v>`, xmlText(v))
 		}
 	}
-	b.WriteString(`</c>`)
 }
 
 func richRunProps(f *Font) string {

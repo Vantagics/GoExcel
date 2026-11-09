@@ -56,7 +56,9 @@ type Worksheet struct {
 	defaultRowHeight   float64
 	colSpans           []colSpan
 	partName           string
+	kind               string // worksheet, chartsheet, or dialogsheet
 	relID              string
+	relType            string
 	rawPart            []byte
 	rawContentType     string
 	extraRootAttrs     string
@@ -387,6 +389,15 @@ func (ws *Worksheet) SetSheetState(state string) *Worksheet {
 		ws.state = "visible"
 	}
 	return ws
+}
+
+// Kind returns "worksheet", or the OOXML root ("chartsheet", "dialogsheet")
+// when the part is not a worksheet.
+func (ws *Worksheet) Kind() string {
+	if ws.kind == "" {
+		return "worksheet"
+	}
+	return ws.kind
 }
 
 // GetSheetState returns "visible", "hidden", or "veryHidden".

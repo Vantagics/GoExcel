@@ -488,6 +488,71 @@ func assertPackagePartsPreserved(t *testing.T, originalPath string, written []by
 	}
 }
 
+func TestRound1ReferenceDiscrepancies(t *testing.T) {
+	wb, err := OpenFile(filepath.Join("testdata", "excel", "sharedhyperlink.xlsx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := wb.GetActiveSheet()
+	for _, addr := range []string{"A3", "A4", "A5"} {
+		cell, err := ws.GetCellByName(addr)
+		if err != nil || cell.Hyperlink == nil || !strings.Contains(cell.Hyperlink.URL, "apache.org") {
+			t.Errorf("%s hyperlink = %#v err=%v", addr, cell.Hyperlink, err)
+		}
+	}
+
+	merges := openWB(t, "Book1.xlsx")
+	sheet, err := merges.GetSheetByName("Sheet2")
+	if err != nil {
+		// Book1's second sheet is the one with the single-cell merge.
+		sheet, err = merges.GetSheet(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	found := false
+	for _, mc := range sheet.GetMergeCells() {
+		if mc.StartRow == mc.EndRow && mc.StartCol == mc.EndCol {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("single-cell merge missing, got %#v", sheet.GetMergeCells())
+	}
+
+	times := openWB(t, filepath.Join("r1", "cx-Sorting.xlsx"))
+	ts, err := times.GetSheetByName("TimeSpans")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := ts.GetCellByName("A1")
+	if c.Type != CellTypeNumeric {
+		t.Fatalf("time-only A1 type=%v value=%#v", c.Type, c.Value)
+	}
+
+	dtwb := openWB(t, filepath.Join("r1", "cx-DataTableFormula-Excel-Input.xlsx"))
+	col, err := dtwb.GetSheetByName("1D Column")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dc, _ := col.GetCellByName("C4")
+	if dc.Formula != "TABLE(A1)" {
+		t.Fatalf("data table formula = %q", dc.Formula)
+	}
+	if dc.GetStringValue() != "AA" {
+		t.Fatalf("data table cache = %#v", dc.Value)
+	}
+}
+
+func openWB(t *testing.T, name string) *Workbook {
+	t.Helper()
+	wb, err := OpenFile(filepath.Join("testdata", "excel", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wb
+}
+
 func TestExcelFixtureSemantics(t *testing.T) {
 	open := func(name string) *Workbook {
 		t.Helper()

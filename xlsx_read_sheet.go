@@ -18,6 +18,10 @@ type pendingCell struct {
 	fType      string
 	fRef       string
 	fSi        string
+	fR1        string
+	fR2        string
+	fDT2D      string
+	fDTR       string
 	inline     string
 	inlineRich *RichText
 	hasInline  bool
@@ -524,6 +528,10 @@ func parseCell(dec *xml.Decoder, start xml.StartElement, row, col int, theme []s
 				pc.fType = attrLocal(t, "t")
 				pc.fRef = attrLocal(t, "ref")
 				pc.fSi = attrLocal(t, "si")
+				pc.fR1 = attrLocal(t, "r1")
+				pc.fR2 = attrLocal(t, "r2")
+				pc.fDT2D = attrLocal(t, "dt2D")
+				pc.fDTR = attrLocal(t, "dtr")
 				var text strings.Builder
 				if err := readCharData(dec, &text, "f"); err != nil {
 					return pc, err
@@ -586,7 +594,7 @@ func applyPendingCell(ws *Worksheet, pc *pendingCell, sst []sstItem, styles *sty
 			isDate = styles.xfs[idx].date
 		}
 	}
-	hasFormula := pc.formula != "" || pc.fType == "array" || pc.fType == "shared"
+	hasFormula := pc.formula != "" || pc.fType == "array" || pc.fType == "shared" || pc.fType == "dataTable"
 	hasValue := pc.value != "" || pc.hasInline
 	if !hasFormula && !hasValue && st == nil {
 		return
@@ -596,6 +604,18 @@ func applyPendingCell(ws *Worksheet, pc *pendingCell, sst []sstItem, styles *sty
 		cell.Style = st
 	}
 	if hasFormula {
+		if pc.fType == "dataTable" {
+			cell.SetFormula(dataTableFormula(pc.fR1, pc.fR2))
+			cell.dt = &dataTable{
+				Ref:  pc.fRef,
+				R1:   pc.fR1,
+				R2:   pc.fR2,
+				TwoD: parseBoolAttr(pc.fDT2D, false),
+				Row:  parseBoolAttr(pc.fDTR, false),
+			}
+			applyCached(cell, pc, false, wb)
+			return
+		}
 		formula := pc.formula
 		if strings.HasPrefix(formula, "=") {
 			formula = strings.TrimPrefix(formula, "=")
@@ -652,6 +672,11 @@ func applyPendingCell(ws *Worksheet, pc *pendingCell, sst []sstItem, styles *sty
 }
 
 func applyCached(cell *Cell, pc *pendingCell, isDate bool, wb *Workbook) {
+	if pc.t == "str" || pc.t == "e" {
+		cell.cachedType = pc.t
+		cell.Value = pc.value
+		return
+	}
 	if pc.value == "" {
 		return
 	}
@@ -710,6 +735,9 @@ func parseMergeCells(dec *xml.Decoder, ws *Worksheet) error {
 		case xml.StartElement:
 			if t.Name.Local == "mergeCell" {
 				if ref := attrLocal(t, "ref"); ref != "" {
+					if !strings.Contains(ref, ":") {
+						ref = ref + ":" + ref
+					}
 					_ = ws.MergeCells(ref)
 				}
 			}
@@ -744,16 +772,17 @@ func parseHyperlinks(dec *xml.Decoder, ws *Worksheet) error {
 					target = loc
 				}
 				if ref != "" && target != "" {
-					cellRef := ref
-					if i := strings.IndexByte(cellRef, ':'); i >= 0 {
-						cellRef = cellRef[:i]
+					link := NewHyperlink(target)
+					if tip := attrLocal(t, "tooltip"); tip != "" {
+						link.SetTooltip(tip)
 					}
-					if cell, err := ws.GetCellByName(cellRef); err == nil {
-						link := NewHyperlink(target)
-						if tip := attrLocal(t, "tooltip"); tip != "" {
-							link.SetTooltip(tip)
+					for _, addr := range expandRef(ref) {
+						if cell, err := ws.GetCellByName(addr); err == nil {
+							// Each cell needs its own hyperlink value; the
+							// relationship id is filled in per cell at write time.
+							cp := *link
+							cell.SetHyperlink(&cp)
 						}
-						cell.SetHyperlink(link)
 					}
 				}
 			}
@@ -1069,6 +1098,51 @@ func readCommentText(dec *xml.Decoder) string {
 		}
 	}
 	return b.String()
+}
+
+func dataTableFormula(r1, r2 string) string {
+	if r2 != "" {
+		return "TABLE(" + r1 + "," + r2 + ")"
+	}
+	if r1 == "" {
+		return "TABLE()"
+	}
+	return "TABLE(" + r1 + ")"
+}
+
+// expandRef lists every cell in a single reference or a rectangular range.
+// Very large ranges keep only the top-left cell so a whole-column hyperlink
+// cannot materialize a million cells.
+func expandRef(ref string) []string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil
+	}
+	if !strings.Contains(ref, ":") {
+		if _, err := ParseCellReference(ref); err != nil {
+			return nil
+		}
+		return []string{ref}
+	}
+	start, end, err := ParseRange(ref)
+	if err != nil {
+		return nil
+	}
+	rows := end.Row - start.Row + 1
+	cols := end.ColumnIdx - start.ColumnIdx + 1
+	if rows < 1 || cols < 1 || rows*cols > 4096 {
+		return []string{start.Column + strconv.Itoa(start.Row)}
+	}
+	out := make([]string, 0, rows*cols)
+	for r := start.Row; r <= end.Row; r++ {
+		for c := start.ColumnIdx; c <= end.ColumnIdx; c++ {
+			name, err := CellName(r-1, c)
+			if err == nil {
+				out = append(out, name)
+			}
+		}
+	}
+	return out
 }
 
 func (wb *Workbook) timeFromSerial(serial float64) time.Time {

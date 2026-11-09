@@ -38,6 +38,17 @@ type Cell struct {
 	col        int
 	formulaRef string // array-formula ref, when the formula applies to a range
 	cachedType string // cached formula result type: n, str, b, e
+	dt         *dataTable
+}
+
+// dataTable is an Excel data-table formula (What-If). It is not a normal
+// formula expression; the writer emits it as t="dataTable".
+type dataTable struct {
+	Ref  string
+	R1   string
+	R2   string
+	TwoD bool
+	Row  bool
 }
 
 // NewCell creates a new empty cell.
@@ -92,6 +103,7 @@ func (c *Cell) SetValue(v interface{}) *Cell {
 func (c *Cell) SetFormula(formula string) *Cell {
 	c.Formula = formula
 	c.Type = CellTypeFormula
+	c.dt = nil
 	return c
 }
 

@@ -272,9 +272,12 @@ func extraNamespaceDecls(startTag string) string {
 		keep := false
 		switch {
 		case name == "xmlns":
-			keep = value != spreadsheetNS
+			// The writer always sets the transitional default namespace.
+			keep = false
+		case name == "xmlns:r":
+			keep = false
 		case strings.HasPrefix(name, "xmlns:"):
-			keep = !(name == "xmlns:r" && value == relNS)
+			keep = true
 		case strings.HasSuffix(name, ":Ignorable"):
 			keep = true
 		}
@@ -432,6 +435,7 @@ func keepPackagePart(name string) bool {
 		strings.HasPrefix(l, "xl/embeddings/"),
 		strings.HasPrefix(l, "xl/pivottables/"),
 		strings.HasPrefix(l, "xl/pivotcache/"),
+		strings.Contains(l, "pivot"),
 		strings.HasPrefix(l, "xl/tables/"),
 		strings.HasPrefix(l, "xl/printersettings/"),
 		strings.HasPrefix(l, "xl/threadedcomments/"),

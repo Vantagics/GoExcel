@@ -25,6 +25,7 @@ type styleExtras struct {
 	tableStylesXML string
 	colorsXML      string
 	extLstXML      string
+	rootAttrs      string
 }
 
 func parseStyleSheet(data []byte, theme []string) styleTable {
@@ -32,6 +33,7 @@ func parseStyleSheet(data []byte, theme []string) styleTable {
 	if len(data) == 0 {
 		return table
 	}
+	table.extras.rootAttrs = extraNamespaceDecls(firstStartTag(data, "styleSheet"))
 	rawKids, err := captureRootChildren(data, map[string]bool{
 		"dxfs":        true,
 		"tableStyles": true,
@@ -248,7 +250,7 @@ func buildParsedXF(xf xmlXF, ss xmlStyleSheet, codes map[int]string, theme []str
 		date = isDateFormatID(xf.NumFmtID)
 	}
 	// Text and general formats are not dates even if a builtin id was remapped.
-	if strings.EqualFold(code, "@") || strings.EqualFold(code, "General") {
+	if strings.EqualFold(code, "@") || strings.EqualFold(code, "General") || isTimeOnlyFormat(code) || isTimeOnlyFormatID(xf.NumFmtID) {
 		date = false
 	}
 	return parsedXF{style: st, formatCode: code, date: date}
@@ -735,7 +737,9 @@ func trimFloat(v float64) string {
 
 func (reg *styleRegistry) writeStyles(buf *strings.Builder) {
 	buf.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
-	buf.WriteString(`<styleSheet xmlns="` + spreadsheetNS + `">`)
+	buf.WriteString(`<styleSheet xmlns="` + spreadsheetNS + `"`)
+	buf.WriteString(reg.extras.rootAttrs)
+	buf.WriteString(`>`)
 	if len(reg.numFmts) > 0 {
 		fmt.Fprintf(buf, `<numFmts count="%d">`, len(reg.numFmts))
 		for _, nf := range reg.numFmts {
