@@ -142,6 +142,21 @@ None required.
 ### After
 
 openpyxl + POI read and round-trip: **0 defects**.
+## Round 8 — larger formula and conditional-format workbooks
+
+Samples in `testdata/excel/r8/` (Apache POI, Apache-2.0): ConditionalFormattingSamples (about 650KB), number-format approximations, text formats, structured table references, formula evaluation, shared formulas set blank, and bug69769.
+
+### Before
+
+POI returns an empty string for `Tabelle1!B2` in `poi-bug69769.xlsx`. The shared-string index in the file is `2 ` with a trailing space. goexcel trims the index and reads `Mustermann`, which matches openpyxl.
+
+### Fixed
+
+Recorded as a POI gap, not a goexcel defect. The reader keeps trimming numeric indexes.
+
+### After
+
+openpyxl + POI read and round-trip: **0 defects**. One POI gap on the padded shared-string index.
 ## Later rounds
 
 Filled in as each round lands.
