@@ -157,6 +157,21 @@ Recorded as a POI gap, not a goexcel defect. The reader keeps trimming numeric i
 ### After
 
 openpyxl + POI read and round-trip: **0 defects**. One POI gap on the padded shared-string index.
+## Round 9 — macros, templates, embeddings, and protection
+
+Samples in `testdata/excel/r9/` (Apache POI, Apache-2.0): `SimpleMacro.xlsm`, `test.xltx`, an embedded package, a picture plus shape, comments, workbook and sheet passwords, a clone-sheet workbook, and a header containing `&`.
+
+### Before
+
+No cell-content defects. The macro binary and embeddings have to survive as package parts or Excel/POI repair the file.
+
+### Fixed
+
+None required beyond the part-preservation from round 1. `vbaProject.bin` and embeddings stay in the zip, and the workbook content type stays macro-enabled when that part is present.
+
+### After
+
+openpyxl + POI read and round-trip: **0 defects**.
 ## Later rounds
 
 Filled in as each round lands.
