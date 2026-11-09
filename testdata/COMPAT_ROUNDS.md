@@ -81,6 +81,22 @@ Covered by the clock-fraction comparison from round 2. Re-run after that change.
 
 openpyxl + POI read and round-trip: **0 defects**. External chart parts stay in the package.
 
+## Round 4 — ClosedXML hyperlinks, validation, and rich text
+
+Samples in `testdata/excel/r4/` (MIT): hyperlinks (including `mailto:` and file targets), sheet and workbook protection, date/decimal/text/time/whole-number validation, external links, kanji rich text with newlines, and validation formulas that reference another sheet.
+
+### Before
+
+POI rewrote `D:/Test.xlsx` as `D:\Test.xlsx`. A shared string whose text is `=A*B` was treated as a formula by the harness.
+
+### Fixed
+
+Link comparison treats `\` and `/` as the same path. Only cells whose type is formula (or an array/data-table formula object) are compared as formulas. The package target is preserved as stored.
+
+### After
+
+openpyxl + POI read and round-trip: **0 defects**.
+
 ## Later rounds
 
 Filled in as each round lands.
