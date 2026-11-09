@@ -112,6 +112,21 @@ Formula comparison requires a formula cell type (or an array/data-table formula 
 ### After
 
 openpyxl + POI read and round-trip: **0 defects**.
+## Round 6 — fonts, fills, borders, and theme colors
+
+Samples in `testdata/excel/r6/` (ClosedXML, MIT): alignment, borders, fills, fonts, number formats, row/column styles, phonetics, quote-prefix, text rotation, theme colors, merged-cell borders, and differential fills.
+
+### Before
+
+No value, formula, merge, name, comment, or hyperlink defects against openpyxl or POI. Theme colors and dxf fills are carried in `styles.xml`, which round-trips with the original namespace declarations.
+
+### Fixed
+
+None required for cell content. Preserved style parts from round 1 already cover this batch.
+
+### After
+
+openpyxl + POI read and round-trip: **0 defects**.
 ## Later rounds
 
 Filled in as each round lands.
