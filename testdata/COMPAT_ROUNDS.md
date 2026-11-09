@@ -97,6 +97,21 @@ Link comparison treats `\` and `/` as the same path. Only cells whose type is fo
 
 openpyxl + POI read and round-trip: **0 defects**.
 
+## Round 5 — protection, comments, and data tables
+
+Samples in `testdata/excel/r5/` (ClosedXML, MIT, several produced by LibreOffice): sheet passwords, SHA-512 and structure protection, one- and two-variable data tables, comments with color indexes, comment insets, and a text-box hyperlink.
+
+### Before
+
+`cx-one-variable.xlsx` stores the label `=A*B` as a shared string. The harness treated every string that starts with `=` as a formula, so C1 disagreed.
+
+### Fixed
+
+Formula comparison requires a formula cell type (or an array/data-table formula object). The string `=A*B` stays text, matching the package.
+
+### After
+
+openpyxl + POI read and round-trip: **0 defects**.
 ## Later rounds
 
 Filled in as each round lands.
