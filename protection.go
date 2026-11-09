@@ -9,23 +9,27 @@ import (
 
 // SheetProtection represents protection settings for a worksheet.
 type SheetProtection struct {
-	Sheet              bool
-	Objects            bool
-	Scenarios          bool
-	FormatCells        bool
-	FormatColumns      bool
-	FormatRows         bool
-	InsertColumns      bool
-	InsertRows         bool
-	InsertHyperlinks   bool
-	DeleteColumns      bool
-	DeleteRows         bool
-	SelectLockedCells  bool
-	Sort               bool
-	AutoFilter         bool
-	PivotTables        bool
+	Sheet               bool
+	Objects             bool
+	Scenarios           bool
+	FormatCells         bool
+	FormatColumns       bool
+	FormatRows          bool
+	InsertColumns       bool
+	InsertRows          bool
+	InsertHyperlinks    bool
+	DeleteColumns       bool
+	DeleteRows          bool
+	SelectLockedCells   bool
+	Sort                bool
+	AutoFilter          bool
+	PivotTables         bool
 	SelectUnlockedCells bool
-	Password           string // hashed password
+	Password            string // hashed password
+	algoName            string
+	hashValue           string
+	saltValue           string
+	spinCount           string
 }
 
 // NewSheetProtection creates a new sheet protection with default settings.
@@ -90,6 +94,7 @@ type WorkbookProtection struct {
 	LockStructure bool
 	LockWindows   bool
 	Password      string
+	revisions     bool
 }
 
 // NewWorkbookProtection creates a new workbook protection.

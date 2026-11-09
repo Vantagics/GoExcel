@@ -16,13 +16,32 @@ type DocumentProperties struct {
 	Category       string
 }
 
+// definedName is a workbook defined name, including sheet-scoped names.
+type definedName struct {
+	Name         string
+	Ref          string
+	LocalSheetID int
+	HasLocal     bool
+	Hidden       bool
+}
+
 // Workbook represents a spreadsheet workbook containing one or more worksheets.
 type Workbook struct {
 	worksheets         []*Worksheet
 	activeSheet        int
 	Properties         DocumentProperties
 	namedRanges        map[string]string // name -> "Sheet1!A1:B2"
+	definedNameList    []definedName
 	workbookProtection *WorkbookProtection
+	date1904           bool
+
+	// source is the package this workbook was loaded from, used to preserve
+	// parts the model does not edit (theme, drawings, charts, media, pivots).
+	source         *ooxmlPackage
+	extraRootAttrs string
+	preserved      []rawXML
+	styleExtras    styleExtras
+	workbookRels   []relationship
 }
 
 // New creates a new workbook with a single default worksheet.
@@ -128,9 +147,23 @@ func (wb *Workbook) SetActiveSheet(index int) error {
 	return nil
 }
 
+// SetDate1904 selects Excel's 1904 date system (used by workbooks created on
+// older Mac Excel). The zero value is the 1900 date system.
+func (wb *Workbook) SetDate1904(v bool) { wb.date1904 = v }
+
+// IsDate1904 reports whether the workbook uses the 1904 date system.
+func (wb *Workbook) IsDate1904() bool { return wb.date1904 }
+
 // AddNamedRange adds a named range to the workbook.
 func (wb *Workbook) AddNamedRange(name, reference string) {
 	wb.namedRanges[name] = reference
+	for i := range wb.definedNameList {
+		if wb.definedNameList[i].Name == name && !wb.definedNameList[i].HasLocal {
+			wb.definedNameList[i].Ref = reference
+			return
+		}
+	}
+	wb.definedNameList = append(wb.definedNameList, definedName{Name: name, Ref: reference})
 }
 
 // GetNamedRange returns the reference for a named range.
@@ -157,6 +190,14 @@ func (wb *Workbook) RemoveNamedRange(name string) error {
 		return fmt.Errorf("named range %q not found", name)
 	}
 	delete(wb.namedRanges, name)
+	kept := wb.definedNameList[:0]
+	for _, dn := range wb.definedNameList {
+		if dn.Name == name && !dn.HasLocal {
+			continue
+		}
+		kept = append(kept, dn)
+	}
+	wb.definedNameList = kept
 	return nil
 }
 
@@ -262,6 +303,12 @@ func (wb *Workbook) CopySheet(srcIndex int, newTitle string) (*Worksheet, error)
 		dst.frozen = &frozenCopy
 	}
 	dst.tabColor = src.tabColor
+	dst.state = src.state
+	dst.rightToLeft = src.rightToLeft
+	dst.defaultRowHeight = src.defaultRowHeight
+	if len(src.colSpans) > 0 {
+		dst.colSpans = append([]colSpan(nil), src.colSpans...)
+	}
 	return dst, nil
 }
 

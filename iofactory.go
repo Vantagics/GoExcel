@@ -10,7 +10,7 @@ import (
 func OpenFile(filename string) (*Workbook, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
 	switch ext {
-	case ".xlsx":
+	case ".xlsx", ".xlsm", ".xltx", ".xltm":
 		return NewXLSXReader().Open(filename)
 	case ".csv":
 		return NewCSVReader().Open(filename)
@@ -23,7 +23,7 @@ func OpenFile(filename string) (*Workbook, error) {
 func SaveFile(wb *Workbook, filename string) error {
 	ext := strings.ToLower(filepath.Ext(filename))
 	switch ext {
-	case ".xlsx":
+	case ".xlsx", ".xlsm", ".xltx", ".xltm":
 		return NewXLSXWriter().Save(wb, filename)
 	case ".csv":
 		return NewCSVWriter().Save(wb, filename)

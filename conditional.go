@@ -4,15 +4,15 @@ package gospreadsheet
 type ConditionalType string
 
 const (
-	ConditionalCellIs      ConditionalType = "cellIs"
-	ConditionalExpression  ConditionalType = "expression"
-	ConditionalColorScale  ConditionalType = "colorScale"
-	ConditionalDataBar     ConditionalType = "dataBar"
-	ConditionalIconSet     ConditionalType = "iconSet"
-	ConditionalTop10       ConditionalType = "top10"
-	ConditionalAboveAvg    ConditionalType = "aboveAverage"
-	ConditionalDuplicates  ConditionalType = "duplicateValues"
-	ConditionalUniqueVals  ConditionalType = "uniqueValues"
+	ConditionalCellIs       ConditionalType = "cellIs"
+	ConditionalExpression   ConditionalType = "expression"
+	ConditionalColorScale   ConditionalType = "colorScale"
+	ConditionalDataBar      ConditionalType = "dataBar"
+	ConditionalIconSet      ConditionalType = "iconSet"
+	ConditionalTop10        ConditionalType = "top10"
+	ConditionalAboveAvg     ConditionalType = "aboveAverage"
+	ConditionalDuplicates   ConditionalType = "duplicateValues"
+	ConditionalUniqueVals   ConditionalType = "uniqueValues"
 	ConditionalContainsText ConditionalType = "containsText"
 )
 
@@ -32,18 +32,19 @@ const (
 
 // ConditionalRule represents a single conditional formatting rule.
 type ConditionalRule struct {
-	Type     ConditionalType
-	Operator ConditionalOperator
-	Formula  []string // one or two formulas depending on operator
-	Style    *Style
-	Priority int
+	Type       ConditionalType
+	Operator   ConditionalOperator
+	Formula    []string // one or two formulas depending on operator
+	Style      *Style
+	Priority   int
 	StopIfTrue bool
 }
 
 // ConditionalFormatting represents conditional formatting applied to a range.
 type ConditionalFormatting struct {
-	Range string // e.g., "A1:A10"
-	Rules []ConditionalRule
+	Range    string // e.g., "A1:A10"
+	Rules    []ConditionalRule
+	fromFile bool
 }
 
 // NewConditionalFormatting creates a new conditional formatting for a range.

@@ -4,17 +4,17 @@ package gospreadsheet
 type PaperSize int
 
 const (
-	PaperLetter    PaperSize = 1
+	PaperLetter      PaperSize = 1
 	PaperLetterSmall PaperSize = 2
-	PaperTabloid   PaperSize = 3
-	PaperLedger    PaperSize = 4
-	PaperLegal     PaperSize = 5
-	PaperA3        PaperSize = 8
-	PaperA4        PaperSize = 9
-	PaperA4Small   PaperSize = 10
-	PaperA5        PaperSize = 11
-	PaperB4        PaperSize = 12
-	PaperB5        PaperSize = 13
+	PaperTabloid     PaperSize = 3
+	PaperLedger      PaperSize = 4
+	PaperLegal       PaperSize = 5
+	PaperA3          PaperSize = 8
+	PaperA4          PaperSize = 9
+	PaperA4Small     PaperSize = 10
+	PaperA5          PaperSize = 11
+	PaperB4          PaperSize = 12
+	PaperB5          PaperSize = 13
 )
 
 // Orientation represents page orientation.
@@ -49,10 +49,10 @@ func DefaultPageMargins() PageMargins {
 
 // HeaderFooter represents page header and footer content.
 type HeaderFooter struct {
-	OddHeader  string
-	OddFooter  string
-	EvenHeader string
-	EvenFooter string
+	OddHeader        string
+	OddFooter        string
+	EvenHeader       string
+	EvenFooter       string
 	DifferentOddEven bool
 }
 
@@ -63,20 +63,21 @@ type PrintArea struct {
 
 // PageSetup represents the page setup/print settings for a worksheet.
 type PageSetup struct {
-	PaperSize    PaperSize
-	Orientation  Orientation
-	Scale        int // percentage, 10-400
-	FitToWidth   int // number of pages wide
-	FitToHeight  int // number of pages tall
-	Margins      PageMargins
-	HeaderFooter *HeaderFooter
-	PrintArea    *PrintArea
-	PrintGridlines bool
-	PrintHeadings  bool
+	PaperSize          PaperSize
+	Orientation        Orientation
+	Scale              int // percentage, 10-400
+	FitToWidth         int // number of pages wide
+	FitToHeight        int // number of pages tall
+	Margins            PageMargins
+	HeaderFooter       *HeaderFooter
+	PrintArea          *PrintArea
+	PrintGridlines     bool
+	PrintHeadings      bool
 	CenterHorizontally bool
 	CenterVertically   bool
-	RepeatRows    string // e.g., "1:2" for rows 1-2
-	RepeatColumns string // e.g., "A:B" for columns A-B
+	RepeatRows         string // e.g., "1:2" for rows 1-2
+	RepeatColumns      string // e.g., "A:B" for columns A-B
+	rid                string // relationship id of printer settings, when present
 }
 
 // NewPageSetup creates a new page setup with defaults.

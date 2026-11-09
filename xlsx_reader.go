@@ -2,6 +2,7 @@ package gospreadsheet
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -25,12 +26,10 @@ func (r *XLSXReader) Open(filename string) (*Workbook, error) {
 		return nil, fmt.Errorf("opening file: %w", err)
 	}
 	defer f.Close()
-
 	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
-
 	return r.Read(f, info.Size())
 }
 
@@ -40,280 +39,530 @@ func (r *XLSXReader) Read(reader io.ReaderAt, size int64) (*Workbook, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening zip: %w", err)
 	}
-
+	pkg := readPackage(zr)
 	wb := NewEmpty()
+	wb.source = pkg
 
-	// Read shared strings
-	ss, err := r.readSharedStrings(zr)
-	if err != nil {
-		return nil, fmt.Errorf("reading shared strings: %w", err)
+	wbData, ok := pkg.file("xl/workbook.xml")
+	if !ok {
+		return nil, fmt.Errorf("reading workbook: %w", fmt.Errorf("file %q not found in archive", "xl/workbook.xml"))
 	}
-
-	// Read workbook to get sheet names and order
-	sheetInfos, err := r.readWorkbookSheets(zr)
+	relsData, ok := pkg.file("xl/_rels/workbook.xml.rels")
+	if !ok {
+		return nil, fmt.Errorf("reading workbook rels: %w", fmt.Errorf("file %q not found in archive", "xl/_rels/workbook.xml.rels"))
+	}
+	rels, err := parseRelationships(relsData)
 	if err != nil {
+		return nil, fmt.Errorf("reading workbook rels: %w", fmt.Errorf("parsing workbook.xml.rels: %w", err))
+	}
+	wb.workbookRels = rels
+	if err := parseWorkbook(wbData, wb); err != nil {
 		return nil, fmt.Errorf("reading workbook: %w", err)
 	}
 
-	// Read workbook relationships to map rId -> sheet file
-	relMap, err := r.readWorkbookRels(zr)
-	if err != nil {
-		return nil, fmt.Errorf("reading workbook rels: %w", err)
+	var theme []string
+	if rel, ok := findRel(rels, "theme"); ok {
+		if p := resolvePart("xl/workbook.xml", rel.Target); p != "" {
+			if data, ok := pkg.file(p); ok {
+				theme = loadThemeColors(data)
+			}
+		}
+	}
+	styles := styleTable{}
+	stylePath := "xl/styles.xml"
+	if rel, ok := findRel(rels, "styles"); ok {
+		if p := resolvePart("xl/workbook.xml", rel.Target); p != "" {
+			stylePath = p
+		}
+	}
+	if data, ok := pkg.file(stylePath); ok {
+		styles = parseStyleSheet(data, theme)
+		wb.styleExtras = styles.extras
 	}
 
-	// Read styles to detect date-formatted cells
-	styleNumFmts := r.readStyles(zr)
+	sst, err := loadSharedStrings(pkg, rels)
+	if err != nil {
+		return nil, fmt.Errorf("reading shared strings: %w", err)
+	}
+	readCoreProperties(pkg, wb)
 
-	// Read core properties
-	r.readCoreProperties(zr, wb)
-
-	// Read each sheet
-	for _, si := range sheetInfos {
-		target, ok := relMap[si.rID]
-		if !ok {
+	for _, ws := range wb.worksheets {
+		if ws.partName == "" {
 			continue
 		}
-		ws, err := wb.AddSheet(si.name)
-		if err != nil {
-			return nil, err
+		data, ok := pkg.file(ws.partName)
+		if !ok {
+			return nil, fmt.Errorf("reading sheet %q: %w", ws.title, fmt.Errorf("file %q not found in archive", ws.partName))
 		}
-		if err := r.readSheet(zr, ws, target, ss, styleNumFmts); err != nil {
-			return nil, fmt.Errorf("reading sheet %q: %w", si.name, err)
+		if root := rootLocalName(data); root != "" && root != "worksheet" {
+			ws.rawPart = append([]byte(nil), data...)
+			if ctData, ok := pkg.file("[Content_Types].xml"); ok {
+				ws.rawContentType = parseContentTypes(ctData).overrideFor(ws.partName)
+			}
+			if relData, ok := pkg.file(relsPathFor(ws.partName)); ok {
+				if sheetRels, err := parseRelationships(relData); err == nil {
+					ws.sheetRels = sheetRels
+				}
+			}
+			continue
+		}
+		if err := readWorksheet(ws, data, pkg, sst, &styles, wb, theme); err != nil {
+			return nil, fmt.Errorf("reading sheet %q: %w", ws.title, err)
 		}
 	}
-
 	return wb, nil
 }
 
-type sheetInfo struct {
-	name string
-	rID  string
+func readZipFile(zr *zip.Reader, name string) ([]byte, error) {
+	for _, f := range zr.File {
+		if strings.EqualFold(f.Name, name) {
+			rc, err := f.Open()
+			if err != nil {
+				return nil, err
+			}
+			defer rc.Close()
+			return io.ReadAll(rc)
+		}
+	}
+	return nil, fmt.Errorf("file %q not found in archive", name)
 }
 
-func (r *XLSXReader) readSheet(zr *zip.Reader, ws *Worksheet, path string, ss []string, styleNumFmts []int) error {
-	data, err := readZipFile(zr, path)
+func loadSharedStrings(pkg *ooxmlPackage, rels []relationship) ([]sstItem, error) {
+	path := "xl/sharedStrings.xml"
+	if rel, ok := findRel(rels, "sharedStrings"); ok {
+		if p := resolvePart("xl/workbook.xml", rel.Target); p != "" {
+			path = p
+		}
+	}
+	data, ok := pkg.file(path)
+	if !ok {
+		return nil, nil
+	}
+	items, err := parseSharedStrings(data)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("parsing sharedStrings.xml: %w", err)
 	}
+	return items, nil
+}
 
-	type xmlCellValue struct {
-		Value string `xml:",chardata"`
-	}
-	type xmlCell struct {
-		Ref     string       `xml:"r,attr"`
-		Type    string       `xml:"t,attr"`
-		Style   string       `xml:"s,attr"`
-		Value   xmlCellValue `xml:"v"`
-		Formula string       `xml:"f"`
-	}
-	type xmlRow struct {
-		R     string    `xml:"r,attr"`
-		Cells []xmlCell `xml:"c"`
-	}
-	type xmlMergeCell struct {
-		Ref string `xml:"ref,attr"`
-	}
-	type xmlSheetData struct {
-		Rows       []xmlRow       `xml:"sheetData>row"`
-		MergeCells []xmlMergeCell `xml:"mergeCells>mergeCell"`
-	}
+type sstItem struct {
+	text string
+	rich *RichText
+}
 
-	var sheetData xmlSheetData
-	if err := xml.Unmarshal(data, &sheetData); err != nil {
-		return fmt.Errorf("parsing sheet xml: %w", err)
+func parseSharedStrings(data []byte) ([]sstItem, error) {
+	dec := xml.NewDecoder(bytes.NewReader(stripBOM(data)))
+	var items []sstItem
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return items, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok || se.Name.Local != "si" {
+			continue
+		}
+		item, err := parseStringItem(dec, nil)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
 	}
+}
 
-	for _, row := range sheetData.Rows {
-		for _, c := range row.Cells {
-			cr, err := ParseCellReference(c.Ref)
-			if err != nil {
-				continue
-			}
-			cell := ws.GetCell(cr.Row-1, cr.ColumnIdx)
-
-			if c.Formula != "" {
-				cell.SetFormula(c.Formula)
-				continue
-			}
-
-			switch c.Type {
-			case "s": // shared string
-				idx, err := strconv.Atoi(c.Value.Value)
-				if err == nil && idx >= 0 && idx < len(ss) {
-					cell.SetValue(ss[idx])
+// parseStringItem reads an si or is element. The start tag is already consumed.
+func parseStringItem(dec *xml.Decoder, theme []string) (sstItem, error) {
+	var plain strings.Builder
+	var runs []RichTextRun
+	inRPh := 0
+	inR := false
+	inT := false
+	sawR := false
+	var cur strings.Builder
+	var font *Font
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return sstItem{}, err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "rPh":
+				inRPh++
+			case "r":
+				if inRPh == 0 {
+					inR = true
+					sawR = true
+					cur.Reset()
+					font = nil
 				}
-			case "b": // boolean
-				cell.SetValue(c.Value.Value == "1")
-			case "e": // error
-				cell.Value = c.Value.Value
-				cell.Type = CellTypeError
-			case "str": // inline string
-				cell.SetValue(c.Value.Value)
-			default: // number or date
-				if c.Value.Value != "" {
-					if v, err := strconv.ParseFloat(c.Value.Value, 64); err == nil {
-						// Check if the style indicates a date format
-						styleIdx, _ := strconv.Atoi(c.Style)
-						if styleIdx >= 0 && styleIdx < len(styleNumFmts) && isDateFormatID(styleNumFmts[styleIdx]) {
-							cell.SetValue(serialToDate(v))
-						} else {
-							cell.SetValue(v)
-						}
-					} else {
-						cell.SetValue(c.Value.Value)
+			case "rPr":
+				if inR && inRPh == 0 {
+					f, err := parseRunProps(dec, theme)
+					if err != nil {
+						return sstItem{}, err
+					}
+					font = f
+				}
+			case "t":
+				if inRPh == 0 {
+					inT = true
+				}
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "rPh":
+				if inRPh > 0 {
+					inRPh--
+				}
+			case "r":
+				if inR && inRPh == 0 {
+					runs = append(runs, RichTextRun{Text: cur.String(), Font: font})
+					inR = false
+				}
+			case "t":
+				inT = false
+			case "si", "is":
+				item := sstItem{text: plain.String()}
+				if sawR {
+					item.rich = &RichText{Runs: runs}
+					if item.text == "" {
+						item.text = item.rich.PlainText()
+					}
+				}
+				return item, nil
+			}
+		case xml.CharData:
+			if inT && inRPh == 0 {
+				s := string(t)
+				plain.WriteString(s)
+				if inR {
+					cur.WriteString(s)
+				}
+			}
+		}
+	}
+}
+
+func parseRunProps(dec *xml.Decoder, theme []string) (*Font, error) {
+	// rPr start already consumed.
+	font := &Font{}
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			depth++
+			switch t.Name.Local {
+			case "b":
+				if attrLocal(t, "val") != "0" && !strings.EqualFold(attrLocal(t, "val"), "false") {
+					font.Bold = true
+				}
+			case "i":
+				if attrLocal(t, "val") != "0" && !strings.EqualFold(attrLocal(t, "val"), "false") {
+					font.Italic = true
+				}
+			case "strike":
+				if attrLocal(t, "val") != "0" {
+					font.Strikethrough = true
+				}
+			case "u":
+				if !strings.EqualFold(attrLocal(t, "val"), "none") && attrLocal(t, "val") != "0" {
+					font.Underline = true
+				}
+			case "sz":
+				font.Size, _ = strconv.ParseFloat(attrLocal(t, "val"), 64)
+			case "rFont", "name":
+				if v := attrLocal(t, "val"); v != "" {
+					font.Name = v
+				}
+			case "color":
+				font.Color = resolveColor(attrLocal(t, "rgb"), attrLocal(t, "theme"), attrLocal(t, "indexed"), parseFloatAttr(attrLocal(t, "tint")), theme)
+			}
+		case xml.EndElement:
+			depth--
+		}
+	}
+	if font.Name == "" && font.Size == 0 && !font.Bold && !font.Italic && !font.Underline && !font.Strikethrough && font.Color == "" {
+		return nil, nil
+	}
+	return font, nil
+}
+
+func parseFloatAttr(v string) float64 {
+	f, _ := strconv.ParseFloat(v, 64)
+	return f
+}
+
+func parseWorkbook(data []byte, wb *Workbook) error {
+	wb.extraRootAttrs = extraNamespaceDecls(firstStartTag(data, "workbook"))
+	data = stripBOM(data)
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("parsing workbook.xml: %w", err)
+		}
+		if _, ok := tok.(xml.StartElement); ok {
+			break
+		}
+	}
+	for {
+		start := dec.InputOffset()
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("parsing workbook.xml: %w", err)
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			if _, end := tok.(xml.EndElement); end {
+				return nil
+			}
+			continue
+		}
+		switch se.Name.Local {
+		case "workbookPr":
+			wb.date1904 = parseBoolAttr(attrLocal(se, "date1904"), false)
+			if err := skipElement(dec); err != nil {
+				return err
+			}
+		case "workbookProtection":
+			wb.workbookProtection = &WorkbookProtection{
+				LockStructure: parseBoolAttr(attrLocal(se, "lockStructure"), false),
+				LockWindows:   parseBoolAttr(attrLocal(se, "lockWindows"), false),
+				revisions:     parseBoolAttr(attrLocal(se, "lockRevision"), false),
+			}
+			if p := attrLocal(se, "workbookPassword"); p != "" {
+				wb.workbookProtection.Password = p
+			}
+			if err := skipElement(dec); err != nil {
+				return err
+			}
+		case "bookViews":
+			if err := parseBookViews(dec, wb); err != nil {
+				return err
+			}
+		case "sheets":
+			if err := parseSheets(dec, wb); err != nil {
+				return err
+			}
+		case "definedNames":
+			if err := parseDefinedNames(dec, wb); err != nil {
+				return err
+			}
+		default:
+			raw, err := elementOuterXML(dec, data, start)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(raw) != "" {
+				wb.preserved = append(wb.preserved, rawXML{Name: se.Name.Local, XML: strings.TrimSpace(raw)})
+			}
+		}
+	}
+}
+
+func parseBookViews(dec *xml.Decoder, wb *Workbook) error {
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "workbookView" {
+				if v := attrLocal(t, "activeTab"); v != "" {
+					if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+						wb.activeSheet = n
 					}
 				}
 			}
+			if err := skipElement(dec); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if t.Name.Local == "bookViews" {
+				return nil
+			}
 		}
 	}
+}
 
-	// Read merge cells
-	for _, mc := range sheetData.MergeCells {
-		if err := ws.MergeCells(mc.Ref); err != nil {
-			continue // skip invalid merge ranges
+func parseSheets(dec *xml.Decoder, wb *Workbook) error {
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "sheet" {
+				name := attrLocal(t, "name")
+				rid := attrLocal(t, "id")
+				state := attrLocal(t, "state")
+				if _, ok := relByID(wb.workbookRels, rid); ok {
+					ws, err := wb.AddSheet(name)
+					if err != nil {
+						return err
+					}
+					ws.relID = rid
+					ws.partName = resolvePart("xl/workbook.xml", relByIDMust(wb.workbookRels, rid).Target)
+					if state == "hidden" || state == "veryHidden" {
+						ws.state = state
+					}
+				}
+			}
+			if err := skipElement(dec); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if t.Name.Local == "sheets" {
+				return nil
+			}
 		}
 	}
-
-	return nil
 }
 
-func (r *XLSXReader) readWorkbookSheets(zr *zip.Reader) ([]sheetInfo, error) {
-	data, err := readZipFile(zr, "xl/workbook.xml")
-	if err != nil {
-		return nil, err
-	}
-
-	type xmlSheet struct {
-		Name    string `xml:"name,attr"`
-		SheetID string `xml:"sheetId,attr"`
-		RID     string `xml:"id,attr"`
-	}
-	type xmlSheets struct {
-		Sheets []xmlSheet `xml:"sheets>sheet"`
-	}
-
-	var sheets xmlSheets
-	if err := xml.Unmarshal(data, &sheets); err != nil {
-		return nil, fmt.Errorf("parsing workbook.xml: %w", err)
-	}
-
-	infos := make([]sheetInfo, len(sheets.Sheets))
-	for i, s := range sheets.Sheets {
-		infos[i] = sheetInfo{name: s.Name, rID: s.RID}
-	}
-	return infos, nil
-}
-
-func (r *XLSXReader) readWorkbookRels(zr *zip.Reader) (map[string]string, error) {
-	data, err := readZipFile(zr, "xl/_rels/workbook.xml.rels")
-	if err != nil {
-		return nil, err
-	}
-
-	type xmlRel struct {
-		ID     string `xml:"Id,attr"`
-		Target string `xml:"Target,attr"`
-	}
-	type xmlRels struct {
-		Rels []xmlRel `xml:"Relationship"`
-	}
-
-	var rels xmlRels
-	if err := xml.Unmarshal(data, &rels); err != nil {
-		return nil, fmt.Errorf("parsing workbook.xml.rels: %w", err)
-	}
-
-	relMap := make(map[string]string)
-	for _, rel := range rels.Rels {
-		relMap[rel.ID] = workbookRelationshipTargetPath(rel.Target)
-	}
-	return relMap, nil
-}
-
-func workbookRelationshipTargetPath(target string) string {
-	target = strings.ReplaceAll(strings.TrimSpace(target), "\\", "/")
-	target = strings.TrimPrefix(target, "/")
-	if strings.HasPrefix(target, "xl/") {
-		return target
-	}
-	return "xl/" + target
-}
-
-func (r *XLSXReader) readSharedStrings(zr *zip.Reader) ([]string, error) {
-	data, err := readZipFile(zr, "xl/sharedStrings.xml")
-	if err != nil {
-		// Shared strings may not exist
-		return nil, nil
-	}
-
-	type xmlT struct {
-		Value string `xml:",chardata"`
-	}
-	type xmlSI struct {
-		T xmlT `xml:"t"`
-	}
-	type xmlSST struct {
-		SI []xmlSI `xml:"si"`
-	}
-
-	var sst xmlSST
-	if err := xml.Unmarshal(data, &sst); err != nil {
-		return nil, fmt.Errorf("parsing sharedStrings.xml: %w", err)
-	}
-
-	strings := make([]string, len(sst.SI))
-	for i, si := range sst.SI {
-		strings[i] = si.T.Value
-	}
-	return strings, nil
-}
-
-// readStyles parses xl/styles.xml and returns a slice mapping each cellXf index
-// to its numFmtId. This allows the reader to detect date-formatted cells.
-func (r *XLSXReader) readStyles(zr *zip.Reader) []int {
-	data, err := readZipFile(zr, "xl/styles.xml")
-	if err != nil {
-		return nil
-	}
-
-	type xmlNumFmt struct {
-		NumFmtID   int    `xml:"numFmtId,attr"`
-		FormatCode string `xml:"formatCode,attr"`
-	}
-	type xmlXf struct {
-		NumFmtID int `xml:"numFmtId,attr"`
-	}
-	type xmlStyleSheet struct {
-		NumFmts []xmlNumFmt `xml:"numFmts>numFmt"`
-		CellXfs []xmlXf     `xml:"cellXfs>xf"`
-	}
-
-	var ss xmlStyleSheet
-	if err := xml.Unmarshal(data, &ss); err != nil {
-		return nil
-	}
-
-	// Build custom numFmt lookup for date detection
-	customDateFmts := make(map[int]bool)
-	for _, nf := range ss.NumFmts {
-		if looksLikeDateFormat(nf.FormatCode) {
-			customDateFmts[nf.NumFmtID] = true
+func relByID(rels []relationship, id string) (relationship, bool) {
+	for _, rel := range rels {
+		if rel.ID == id {
+			return rel, true
 		}
 	}
+	return relationship{}, false
+}
 
-	// Store the numFmtId for each xf, also mark custom date formats
-	result := make([]int, len(ss.CellXfs))
-	for i, xf := range ss.CellXfs {
-		fmtID := xf.NumFmtID
-		// If it's a custom format that looks like a date, remap to a known date ID
-		// so isDateFormatID can catch it
-		if customDateFmts[fmtID] {
-			result[i] = 14 // treat as built-in date
-		} else {
-			result[i] = fmtID
+func relByIDMust(rels []relationship, id string) relationship {
+	rel, _ := relByID(rels, id)
+	return rel
+}
+
+func parseDefinedNames(dec *xml.Decoder, wb *Workbook) error {
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local != "definedName" {
+				if err := skipElement(dec); err != nil {
+					return err
+				}
+				continue
+			}
+			var dn struct {
+				Name   string `xml:"name,attr"`
+				Local  string `xml:"localSheetId,attr"`
+				Hidden string `xml:"hidden,attr"`
+				Ref    string `xml:",chardata"`
+			}
+			if err := dec.DecodeElement(&dn, &t); err != nil {
+				return err
+			}
+			item := definedName{
+				Name:   dn.Name,
+				Ref:    strings.TrimSpace(dn.Ref),
+				Hidden: parseBoolAttr(dn.Hidden, false),
+			}
+			if dn.Local != "" {
+				if n, err := strconv.Atoi(dn.Local); err == nil {
+					item.HasLocal = true
+					item.LocalSheetID = n
+				}
+			}
+			wb.addDefinedName(item)
+			if item.HasLocal {
+				if ws, err := wb.GetSheet(item.LocalSheetID); err == nil {
+					switch item.Name {
+					case "_xlnm.Print_Area":
+						ws.GetPageSetup().SetPrintArea(item.Ref)
+					case "_xlnm.Print_Titles":
+						rows, cols := splitPrintTitles(item.Ref)
+						if rows != "" {
+							ws.GetPageSetup().SetRepeatRows(rows)
+						}
+						if cols != "" {
+							ws.GetPageSetup().SetRepeatColumns(cols)
+						}
+					}
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Local == "definedNames" {
+				return nil
+			}
 		}
 	}
-	return result
+}
+
+func splitPrintTitles(ref string) (rows, cols string) {
+	for _, part := range strings.Split(ref, ",") {
+		part = strings.TrimSpace(part)
+		if i := strings.LastIndex(part, "!"); i >= 0 {
+			part = part[i+1:]
+		}
+		part = strings.ReplaceAll(part, "$", "")
+		if part == "" {
+			continue
+		}
+		if isRowSpan(part) {
+			rows = part
+		} else if isColSpan(part) {
+			cols = part
+		}
+	}
+	return rows, cols
+}
+
+func isRowSpan(s string) bool {
+	i := strings.IndexByte(s, ':')
+	if i <= 0 {
+		return false
+	}
+	return isDigits(s[:i]) && isDigits(s[i+1:])
+}
+
+func isColSpan(s string) bool {
+	i := strings.IndexByte(s, ':')
+	if i <= 0 {
+		return false
+	}
+	return isColLetters(s[:i]) && isColLetters(s[i+1:])
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isColLetters(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isASCIILetter(s[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // isDateFormatID returns true if the given numFmtId corresponds to a
@@ -335,45 +584,26 @@ func looksLikeDateFormat(code string) bool {
 		return false
 	}
 	lower := strings.ToLower(code)
-	// Skip formats that are clearly numeric/text
 	if lower == "general" || lower == "@" {
 		return false
 	}
-
-	// Strip content between double quotes (literal strings)
 	cleaned := stripQuotedAndEscaped(lower)
-	// Strip bracketed sections like [Red], [$-409], [h], etc.
-	// but preserve [h] and [m] and [s] which are elapsed time tokens
 	cleaned = stripBracketedExceptElapsed(cleaned)
-
-	// Check for date/time tokens: y, m, d, h, s, am/pm, a/p
-	// Single-char tokens are valid in Excel (e.g. "d-mmm", "m/d/yyyy", "h:mm")
 	hasDate := strings.ContainsAny(cleaned, "yd")
 	hasTime := strings.ContainsAny(cleaned, "hs")
 	hasAMPM := strings.Contains(cleaned, "am/pm") || strings.Contains(cleaned, "a/p")
-
 	if hasDate || hasAMPM {
 		return true
 	}
-	// 'm' is ambiguous (months vs minutes). If 'h' or 's' is present,
-	// it's a time format. If 'm' appears alone, we need 'y' or 'd' to
-	// confirm it's a date — but those are already caught above.
-	// So 'm' alone with 'h' or 's' = time format.
 	if hasTime {
 		return true
 	}
-	// 'm' alone (no y, d, h, s) could be months in a month-only format,
-	// but that's extremely rare and ambiguous. We check for 'mmm' or longer
-	// which is unambiguously a month name format.
 	if strings.Contains(cleaned, "mmm") {
 		return true
 	}
-
 	return false
 }
 
-// stripQuotedAndEscaped removes quoted strings ("...") and escaped characters
-// (\x) from a format code so they don't interfere with token detection.
 func stripQuotedAndEscaped(code string) string {
 	var b strings.Builder
 	b.Grow(len(code))
@@ -381,16 +611,14 @@ func stripQuotedAndEscaped(code string) string {
 	for i < len(code) {
 		switch code[i] {
 		case '"':
-			// Skip everything until closing quote
 			i++
 			for i < len(code) && code[i] != '"' {
 				i++
 			}
 			if i < len(code) {
-				i++ // skip closing quote
+				i++
 			}
 		case '\\':
-			// Skip escaped character
 			i += 2
 		default:
 			b.WriteByte(code[i])
@@ -400,8 +628,6 @@ func stripQuotedAndEscaped(code string) string {
 	return b.String()
 }
 
-// stripBracketedExceptElapsed removes bracketed sections like [Red], [$-409],
-// [DBNum1] etc., but preserves elapsed time tokens [h], [m], [s], [hh], [mm], [ss].
 func stripBracketedExceptElapsed(code string) string {
 	var b strings.Builder
 	b.Grow(len(code))
@@ -415,12 +641,10 @@ func stripBracketedExceptElapsed(code string) string {
 				continue
 			}
 			inner := code[i+1 : i+end]
-			// Preserve elapsed time tokens
 			switch strings.ToLower(inner) {
 			case "h", "hh", "m", "mm", "s", "ss":
 				b.WriteString(inner)
 			}
-			// All other bracketed content is dropped (colors, locale, etc.)
 			i += end + 1
 		} else {
 			b.WriteByte(code[i])
@@ -430,12 +654,28 @@ func stripBracketedExceptElapsed(code string) string {
 	return b.String()
 }
 
-func (r *XLSXReader) readCoreProperties(zr *zip.Reader, wb *Workbook) {
-	data, err := readZipFile(zr, "docProps/core.xml")
-	if err != nil {
+func (wb *Workbook) addDefinedName(dn definedName) {
+	wb.definedNameList = append(wb.definedNameList, dn)
+	key := dn.Name
+	if dn.HasLocal {
+		if _, exists := wb.namedRanges[key]; exists {
+			if ws, err := wb.GetSheet(dn.LocalSheetID); err == nil {
+				key = ws.title + "!" + dn.Name
+			} else {
+				key = fmt.Sprintf("#%d!%s", dn.LocalSheetID, dn.Name)
+			}
+		}
+	}
+	if _, exists := wb.namedRanges[key]; !exists {
+		wb.namedRanges[key] = dn.Ref
+	}
+}
+
+func readCoreProperties(pkg *ooxmlPackage, wb *Workbook) {
+	data, ok := pkg.file("docProps/core.xml")
+	if !ok {
 		return
 	}
-
 	type xmlCore struct {
 		Creator        string `xml:"creator"`
 		Title          string `xml:"title"`
@@ -445,12 +685,10 @@ func (r *XLSXReader) readCoreProperties(zr *zip.Reader, wb *Workbook) {
 		Category       string `xml:"category"`
 		LastModifiedBy string `xml:"lastModifiedBy"`
 	}
-
 	var core xmlCore
-	if err := xml.Unmarshal(data, &core); err != nil {
+	if err := xml.Unmarshal(stripBOM(data), &core); err != nil {
 		return
 	}
-
 	wb.Properties.Creator = core.Creator
 	wb.Properties.Title = core.Title
 	wb.Properties.Subject = core.Subject
@@ -458,18 +696,4 @@ func (r *XLSXReader) readCoreProperties(zr *zip.Reader, wb *Workbook) {
 	wb.Properties.Keywords = core.Keywords
 	wb.Properties.Category = core.Category
 	wb.Properties.LastModifiedBy = core.LastModifiedBy
-}
-
-func readZipFile(zr *zip.Reader, name string) ([]byte, error) {
-	for _, f := range zr.File {
-		if strings.EqualFold(f.Name, name) {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			defer rc.Close()
-			return io.ReadAll(rc)
-		}
-	}
-	return nil, fmt.Errorf("file %q not found in archive", name)
 }

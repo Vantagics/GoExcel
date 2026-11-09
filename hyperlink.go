@@ -4,6 +4,7 @@ package gospreadsheet
 type Hyperlink struct {
 	URL     string
 	Tooltip string
+	rid     string // workbook-local relationship id, set while writing
 }
 
 // NewHyperlink creates a new hyperlink.

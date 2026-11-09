@@ -19,38 +19,52 @@ type MergeCell struct {
 type SortOrder int
 
 const (
-	SortOrderAscending  SortOrder = iota
+	SortOrderAscending SortOrder = iota
 	SortOrderDescending
 )
 
 // SheetView represents view settings for a worksheet.
 type SheetView struct {
-	ZoomScale    uint   // zoom percentage (10-400), default 100
-	ShowGridlines bool
+	ZoomScale         uint // zoom percentage (10-400), default 100
+	ShowGridlines     bool
 	ShowRowColHeaders bool
-	ShowRuler    bool
-	TopLeftCell  string // e.g. "A1"
+	ShowRuler         bool
+	TopLeftCell       string // e.g. "A1"
 }
 
 // Worksheet represents a single worksheet in a spreadsheet.
 type Worksheet struct {
-	title                string
-	cells                map[string]*Cell // key: "row,col" (0-based)
-	mergeCells           []MergeCell
-	colWidths            map[int]float64
-	rowHeights           map[int]float64
-	frozen               *CellReference // frozen pane position
-	parent               *Workbook
-	index                int
-	conditionalFormats   []*ConditionalFormatting
-	dataValidations      []*DataValidation
-	autoFilter           *AutoFilter
-	pageSetup            *PageSetup
-	sheetProtection      *SheetProtection
-	tabColor             string // hex color for sheet tab
-	hiddenRows           map[int]bool
-	hiddenCols           map[int]bool
-	sheetView            *SheetView
+	title              string
+	cells              map[string]*Cell // key: "row,col" (0-based)
+	mergeCells         []MergeCell
+	colWidths          map[int]float64
+	rowHeights         map[int]float64
+	frozen             *CellReference // frozen pane position
+	parent             *Workbook
+	index              int
+	conditionalFormats []*ConditionalFormatting
+	dataValidations    []*DataValidation
+	autoFilter         *AutoFilter
+	pageSetup          *PageSetup
+	sheetProtection    *SheetProtection
+	tabColor           string // hex color for sheet tab
+	hiddenRows         map[int]bool
+	hiddenCols         map[int]bool
+	sheetView          *SheetView
+	state              string // visible, hidden, veryHidden
+	rightToLeft        bool
+	defaultRowHeight   float64
+	colSpans           []colSpan
+	partName           string
+	relID              string
+	rawPart            []byte
+	rawContentType     string
+	extraRootAttrs     string
+	sheetPrRaw         string
+	loadedTabColor     string
+	preserved          []rawXML
+	sheetRels          []relationship
+	autoFilterRaw      string
 }
 
 // NewWorksheet creates a new worksheet with the given title.
@@ -177,6 +191,11 @@ func (ws *Worksheet) SetColumnWidth(col int, width float64) *Worksheet {
 func (ws *Worksheet) GetColumnWidth(col int) float64 {
 	if w, ok := ws.colWidths[col]; ok {
 		return w
+	}
+	for _, sp := range ws.colSpans {
+		if col+1 >= sp.Min && col+1 <= sp.Max && sp.Width != 0 {
+			return sp.Width
+		}
 	}
 	return 8.43 // default Excel column width
 }
@@ -319,6 +338,7 @@ func (ws *Worksheet) GetDataValidations() []*DataValidation {
 // SetAutoFilter sets the auto filter for the worksheet.
 func (ws *Worksheet) SetAutoFilter(af *AutoFilter) *Worksheet {
 	ws.autoFilter = af
+	ws.autoFilterRaw = ""
 	return ws
 }
 
@@ -352,10 +372,29 @@ func (ws *Worksheet) GetSheetProtection() *SheetProtection {
 	return ws.sheetProtection
 }
 
-// SetTabColor sets the sheet tab color (hex string, e.g., "FF0000").
+// SetTabColor sets the sheet tab color (hex string, e.g., "FF0000" or "FFFF0000").
 func (ws *Worksheet) SetTabColor(color string) *Worksheet {
 	ws.tabColor = color
 	return ws
+}
+
+// SetSheetState sets the sheet visibility: "visible", "hidden", or "veryHidden".
+func (ws *Worksheet) SetSheetState(state string) *Worksheet {
+	switch state {
+	case "hidden", "veryHidden":
+		ws.state = state
+	default:
+		ws.state = "visible"
+	}
+	return ws
+}
+
+// GetSheetState returns "visible", "hidden", or "veryHidden".
+func (ws *Worksheet) GetSheetState() string {
+	if ws.state == "" {
+		return "visible"
+	}
+	return ws.state
 }
 
 // GetTabColor returns the sheet tab color.
@@ -629,7 +668,15 @@ func (ws *Worksheet) SetColumnHidden(col int, hidden bool) *Worksheet {
 
 // IsColumnHidden returns whether a column is hidden.
 func (ws *Worksheet) IsColumnHidden(col int) bool {
-	return ws.hiddenCols[col]
+	if ws.hiddenCols[col] {
+		return true
+	}
+	for _, sp := range ws.colSpans {
+		if sp.Hidden && col+1 >= sp.Min && col+1 <= sp.Max {
+			return true
+		}
+	}
+	return false
 }
 
 // SetSheetView sets the sheet view configuration.

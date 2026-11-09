@@ -27,15 +27,17 @@ const (
 
 // Cell represents a single cell in a worksheet.
 type Cell struct {
-	Value     interface{}
-	Type      CellType
-	Formula   string
-	Style     *Style
-	Hyperlink *Hyperlink
-	Comment   *Comment
-	RichText  *RichText
-	row       int
-	col       int
+	Value      interface{}
+	Type       CellType
+	Formula    string
+	Style      *Style
+	Hyperlink  *Hyperlink
+	Comment    *Comment
+	RichText   *RichText
+	row        int
+	col        int
+	formulaRef string // array-formula ref, when the formula applies to a range
+	cachedType string // cached formula result type: n, str, b, e
 }
 
 // NewCell creates a new empty cell.
