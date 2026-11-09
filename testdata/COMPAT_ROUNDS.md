@@ -172,6 +172,31 @@ None required beyond the part-preservation from round 1. `vbaProject.bin` and em
 ### After
 
 openpyxl + POI read and round-trip: **0 defects**.
+## Round 10 — format, date, and header regression set
+
+Samples in `testdata/excel/r10/` (Apache POI, Apache-2.0), prefixed `poi-` so they do not collide with the first corpus: general and elapsed formats, `FormatKM`, decimal formats, indexed colors, date-format numbers, a SUMPRODUCT with unary minus, newlines in formulas, booleans, strict-adjacent `SampleSS`, various data, and a complex header/footer.
+
+### Before
+
+No new content defects. These files repeat feature areas from earlier rounds (dates, elapsed time, booleans, headers) on fresh copies.
+
+### Fixed
+
+None required. They stay in the tree as regression files for `make diffcheck`.
+
+### After
+
+openpyxl + POI read and round-trip: **0 defects** across r2–r10 (122 files in that run) after the round 2–5 comparison fixes.
+
+## Remaining known gaps
+
+- Strict OOXML is read by goexcel. openpyxl and POI refuse it (POI bug 57699). Rewritten files are transitional OOXML.
+- Encrypted workbooks (OLE compound, for example `protected_passtika.xlsx`) are not OOXML zip packages and are not opened.
+- LibreOffice recalculates pivots, localizes captions, and reports `Err:502` for some Excel errors. Conversion succeeds; those drifts are not treated as goexcel defects.
+- POI drops a shared-string index that contains trailing whitespace (`<v>2 </v>`). goexcel and openpyxl read the string.
+- Slicers, sparklines, and pivot layouts are preserved as package parts, not edited in the cell model.
+- Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells.
+- Array-formula anchors are stored on the anchor cell. POI also repeats the formula on members; openpyxl does not. Both match after the anchor check.
 ## Later rounds
 
 Filled in as each round lands.
