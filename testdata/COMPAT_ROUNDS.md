@@ -65,6 +65,22 @@ The harness treats `HH:MM:SS` and `datetime.time` as day-fractions, matching the
 
 openpyxl + POI read and round-trip: **0 defects** on this batch.
 
+## Round 3 — LibreOffice Calc QA workbooks
+
+Samples in `testdata/excel/r3/` from LibreOffice `sc/qa/unit/data/xlsx` (MPL-2.0): external charts and refs, named sheet views, pivot cache sync, sparklines, empty table headers, autofilter named ranges, column styles, and conditional-format listeners. 18 files.
+
+### Before
+
+`lo-MissingPathExternal.xlsx` stores times of day as serials (`06:30:00`, `00:00:18`). The first comparison treated openpyxl's clock text as a different value.
+
+### Fixed
+
+Covered by the clock-fraction comparison from round 2. Re-run after that change.
+
+### After
+
+openpyxl + POI read and round-trip: **0 defects**. External chart parts stay in the package.
+
 ## Later rounds
 
 Filled in as each round lands.
