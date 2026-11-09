@@ -127,6 +127,21 @@ None required for cell content. Preserved style parts from round 1 already cover
 ### After
 
 openpyxl + POI read and round-trip: **0 defects**.
+## Round 7 — tables, headers, and conditional-format order
+
+Samples in `testdata/excel/r7/` (ClosedXML, MIT): inserting and using tables, table column styles, total-row shared strings, headers with line breaks, custom table themes, empty tables, conditional-formatting order, column styles, and a print area that points at another workbook.
+
+### Before
+
+No content defects. Table XML and print-area defined names are preserved as package parts and defined names.
+
+### Fixed
+
+None required.
+
+### After
+
+openpyxl + POI read and round-trip: **0 defects**.
 ## Later rounds
 
 Filled in as each round lands.
