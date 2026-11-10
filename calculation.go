@@ -10,13 +10,16 @@ import (
 
 // CalculationEngine evaluates cell formulas.
 type CalculationEngine struct {
-	workbook *Workbook
-	visiting map[string]bool
+	workbook  *Workbook
+	visiting  map[string]bool
+	row, col  int
+	arrayMode bool
+	locals    map[string]interface{}
 }
 
 // NewCalculationEngine creates a new calculation engine for a workbook.
 func NewCalculationEngine(wb *Workbook) *CalculationEngine {
-	return &CalculationEngine{workbook: wb}
+	return &CalculationEngine{workbook: wb, row: -1, col: -1}
 }
 
 // CalculateCell evaluates the formula in a cell and returns the result.
@@ -28,15 +31,9 @@ func (ce *CalculationEngine) CalculateCell(ws *Worksheet, ref string) (interface
 	if cell.Type != CellTypeFormula {
 		return cell.Value, nil
 	}
-	v, err := ce.evaluate(ws, cell.Formula)
+	v, err := ce.evalFormulaCell(ws, cell)
 	if err != nil {
 		return nil, err
-	}
-	if rg, ok := v.(*formulaRange); ok {
-		if len(rg.values) == 1 {
-			return rg.values[0], nil
-		}
-		return nil, fmt.Errorf("#VALUE!")
 	}
 	if v == nil {
 		return 0.0, nil
@@ -76,9 +73,8 @@ func (ce *CalculationEngine) evaluate(ws *Worksheet, formula string) (interface{
 	if strings.HasPrefix(formula, "=") {
 		formula = strings.TrimSpace(formula[1:])
 	}
-	if len(formula) >= 2 && formula[0] == '{' && formula[len(formula)-1] == '}' {
-		formula = strings.TrimSpace(formula[1 : len(formula)-1])
-	}
+	// Array constants and CSE formulas both use braces. parseAtom reads
+	// `{...}` itself, so the braces stay part of the expression.
 	if formula == "" {
 		return nil, fmt.Errorf("empty formula")
 	}
@@ -158,40 +154,36 @@ func compareValues(left, right interface{}, op string) bool {
 	if op == "<>" && ((left == nil && blankLike(right)) || (right == nil && blankLike(left))) {
 		return false
 	}
-	if left == nil {
-		left = 0.0
-	}
-	if right == nil {
-		right = 0.0
-	}
-	ln, lok := asNumber(left, false)
-	rn, rok := asNumber(right, false)
+	lk, ln, lt := valueRank(left)
+	rk, rn, rt := valueRank(right)
 	var cmp int
 	switch {
-	case lok && rok:
+	case lk == 1 && rk == 1:
 		if ln < rn {
 			cmp = -1
 		} else if ln > rn {
 			cmp = 1
 		}
-	default:
-		ls, lstr := left.(string)
-		rs, rstr := right.(string)
-		if lstr && rstr {
-			cmp = strings.Compare(strings.ToLower(ls), strings.ToLower(rs))
-			break
+	case lk == rk && lk == 2:
+		cmp = strings.Compare(lt, rt)
+	case lk == rk && lk == 3:
+		if ln < rn {
+			cmp = -1
+		} else if ln > rn {
+			cmp = 1
 		}
-		// Excel does not treat a number and text as equal.
+	case lk != rk:
+		// Excel orders number < text < boolean for inequality.
+		// Equality does not coerce across those kinds.
 		if op == "=" {
 			return false
 		}
 		if op == "<>" {
 			return true
 		}
-		lf, rf := toFloat(left), toFloat(right)
-		if lf < rf {
+		if lk < rk {
 			cmp = -1
-		} else if lf > rf {
+		} else {
 			cmp = 1
 		}
 	}
@@ -210,6 +202,32 @@ func compareValues(left, right interface{}, op string) bool {
 		return cmp <= 0
 	default:
 		return false
+	}
+}
+
+// valueRank is Excel's comparison kind: 1 number (blank is 0), 2 text, 3 boolean.
+func valueRank(v interface{}) (kind int, num float64, text string) {
+	if v == nil {
+		return 1, 0, ""
+	}
+	switch t := v.(type) {
+	case bool:
+		if t {
+			return 3, 1, ""
+		}
+		return 3, 0, ""
+	case string:
+		return 2, 0, strings.ToLower(t)
+	case time.Time:
+		return 1, dateToSerial(t), ""
+	default:
+		if n, ok := asNumber(v, false); ok {
+			return 1, n, ""
+		}
+		if s, ok := v.(fmt.Stringer); ok {
+			return 2, 0, strings.ToLower(s.String())
+		}
+		return 2, 0, strings.ToLower(fmt.Sprint(v))
 	}
 }
 
@@ -364,7 +382,14 @@ func (ce *CalculationEngine) resolveCellValue(ws *Worksheet, ref string) (interf
 		return nil, nil
 	}
 	if cell.Type == CellTypeFormula {
-		return ce.evaluate(sheet, cell.Formula)
+		return ce.evalFormulaCell(sheet, cell)
+	}
+	if cell.Type == CellTypeError {
+		s := strings.ToUpper(strings.TrimSpace(fmt.Sprint(cell.Value)))
+		if !isExcelError(s) {
+			s = "#VALUE!"
+		}
+		return excelFault(s), nil
 	}
 	if cell.Type == CellTypeEmpty && cell.Value == nil {
 		return nil, nil

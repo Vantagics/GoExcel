@@ -29,6 +29,9 @@ func getBuiltinFunctions() map[string]formulaFunc {
 		for name, fn := range extraFunctions() {
 			builtinFunctions[name] = fn
 		}
+		for name, fn := range moreFunctions() {
+			builtinFunctions[name] = fn
+		}
 	}
 	return builtinFunctions
 }
@@ -42,30 +45,41 @@ func collectNumericValues(ce *CalculationEngine, ws *Worksheet, args string) ([]
 		if err != nil {
 			return nil, err
 		}
-		if err := excelError(val); err != nil {
+		nums, err := numericList(val)
+		if err != nil {
 			return nil, err
 		}
-		values = append(values, numericList(val)...)
+		values = append(values, nums...)
 	}
 	return values, nil
 }
 
 // numericList returns numbers Excel would aggregate. Range text and blanks are
 // skipped. A scalar is coerced (TRUE -> 1, numeric text -> number).
-func numericList(v interface{}) []float64 {
+func numericList(v interface{}) ([]float64, error) {
 	if rg, ok := v.(*formulaRange); ok {
+		items := rg.values
+		if len(rg.areas) > 0 {
+			items = flattenAreas(rg)
+		}
 		var out []float64
-		for _, item := range rg.values {
+		for _, item := range items {
+			if err := excelError(item); err != nil {
+				return nil, err
+			}
 			if n, ok := asNumber(item, false); ok {
 				out = append(out, n)
 			}
 		}
-		return out
+		return out, nil
+	}
+	if err := excelError(v); err != nil {
+		return nil, err
 	}
 	if n, ok := asNumber(v, true); ok {
-		return []float64{n}
+		return []float64{n}, nil
 	}
-	return nil
+	return nil, nil
 }
 
 func asNumber(v interface{}, coerce bool) (float64, bool) {
@@ -100,11 +114,15 @@ func asNumber(v interface{}, coerce bool) (float64, bool) {
 }
 
 func excelError(v interface{}) error {
-	s, ok := v.(string)
-	if !ok || !isExcelError(s) {
-		return nil
+	switch t := v.(type) {
+	case excelFault:
+		return fmt.Errorf("%s", string(t))
+	case string:
+		if isExcelError(t) {
+			return fmt.Errorf("%s", strings.ToUpper(t))
+		}
 	}
-	return fmt.Errorf("%s", s)
+	return nil
 }
 
 func fnSum(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -135,11 +153,27 @@ func fnAverage(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, 
 }
 
 func fnCount(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
-	values, err := collectNumericValues(ce, ws, args)
-	if err != nil {
-		return nil, err
+	parts := parseArgs(args)
+	n := 0
+	for _, part := range parts {
+		val, err := ce.evaluate(ws, part)
+		if err != nil {
+			return nil, err
+		}
+		items := []interface{}{val}
+		if rg, ok := val.(*formulaRange); ok {
+			items = flattenAreas(rg)
+		}
+		for _, item := range items {
+			if excelError(item) != nil {
+				continue
+			}
+			if _, ok := asNumber(item, false); ok {
+				n++
+			}
+		}
 	}
-	return float64(len(values)), nil
+	return float64(n), nil
 }
 
 func fnCountA(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -224,11 +258,11 @@ func fnAbs(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, erro
 	if err != nil {
 		return nil, err
 	}
-	sv, err := scalarValue(val)
-	if err != nil {
-		return nil, err
-	}
-	n, err := arithNumber(sv)
+	return absNum(ce, val)
+}
+
+func absNum(ce *CalculationEngine, val interface{}) (interface{}, error) {
+	n, err := ce.mustNum(val)
 	if err != nil {
 		return nil, err
 	}
@@ -248,9 +282,16 @@ func fnRound(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, er
 	if err != nil {
 		return nil, err
 	}
-	d := toFloat(digits)
+	n, err := ce.mustNum(val)
+	if err != nil {
+		return nil, err
+	}
+	d, err := ce.mustNum(digits)
+	if err != nil {
+		return nil, err
+	}
 	pow := math.Pow(10, d)
-	return math.Round(toFloat(val)*pow) / pow, nil
+	return math.Round(n*pow) / pow, nil
 }
 
 func fnSqrt(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -258,7 +299,10 @@ func fnSqrt(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, err
 	if err != nil {
 		return nil, err
 	}
-	f := toFloat(val)
+	f, err := ce.mustNum(val)
+	if err != nil {
+		return nil, err
+	}
 	if f < 0 {
 		return nil, fmt.Errorf("#NUM!")
 	}
@@ -278,7 +322,15 @@ func fnPower(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, er
 	if err != nil {
 		return nil, err
 	}
-	return math.Pow(toFloat(base), toFloat(exp)), nil
+	b, err := ce.mustNum(base)
+	if err != nil {
+		return nil, err
+	}
+	e, err := ce.mustNum(exp)
+	if err != nil {
+		return nil, err
+	}
+	return powExcel(b, e)
 }
 
 func fnMod(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -294,11 +346,17 @@ func fnMod(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, erro
 	if err != nil {
 		return nil, err
 	}
-	d := toFloat(div)
+	n, err := ce.mustNum(num)
+	if err != nil {
+		return nil, err
+	}
+	d, err := ce.mustNum(div)
+	if err != nil {
+		return nil, err
+	}
 	if d == 0 {
 		return nil, fmt.Errorf("#DIV/0!")
 	}
-	n := toFloat(num)
 	return n - d*math.Floor(n/d), nil
 }
 
@@ -307,7 +365,11 @@ func fnInt(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, erro
 	if err != nil {
 		return nil, err
 	}
-	return math.Floor(toFloat(val)), nil
+	n, err := ce.mustNum(val)
+	if err != nil {
+		return nil, err
+	}
+	return math.Floor(n), nil
 }
 
 func fnLen(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -315,9 +377,9 @@ func fnLen(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, erro
 	if err != nil {
 		return nil, err
 	}
-	s := fmt.Sprintf("%v", val)
-	if str, ok := val.(string); ok {
-		s = str
+	s, err := ce.textArg(val)
+	if err != nil {
+		return nil, err
 	}
 	return float64(len([]rune(s))), nil
 }
@@ -327,7 +389,11 @@ func fnUpper(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, er
 	if err != nil {
 		return nil, err
 	}
-	return strings.ToUpper(fmt.Sprintf("%v", val)), nil
+	s, err := ce.textArg(val)
+	if err != nil {
+		return nil, err
+	}
+	return strings.ToUpper(s), nil
 }
 
 func fnLower(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -335,7 +401,11 @@ func fnLower(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, er
 	if err != nil {
 		return nil, err
 	}
-	return strings.ToLower(fmt.Sprintf("%v", val)), nil
+	s, err := ce.textArg(val)
+	if err != nil {
+		return nil, err
+	}
+	return strings.ToLower(s), nil
 }
 
 func fnTrim(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -343,7 +413,11 @@ func fnTrim(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, err
 	if err != nil {
 		return nil, err
 	}
-	return strings.TrimSpace(fmt.Sprintf("%v", val)), nil
+	s, err := ce.textArg(val)
+	if err != nil {
+		return nil, err
+	}
+	return strings.TrimSpace(s), nil
 }
 
 func fnLeft(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -359,19 +433,23 @@ func fnLeft(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, err
 	if err != nil {
 		return nil, err
 	}
-	s := fmt.Sprintf("%v", val)
-	if str, ok := val.(string); ok {
-		s = str
+	s, err := ce.textArg(val)
+	if err != nil {
+		return nil, err
 	}
-	runes := []rune(s)
-	count := int(toFloat(n))
-	if count > len(runes) {
-		count = len(runes)
+	count, err := ce.mustNum(n)
+	if err != nil {
+		return nil, err
 	}
 	if count < 0 {
-		count = 0
+		return nil, fmt.Errorf("#VALUE!")
 	}
-	return string(runes[:count]), nil
+	runes := []rune(s)
+	k := int(count)
+	if k > len(runes) {
+		k = len(runes)
+	}
+	return string(runes[:k]), nil
 }
 
 func fnRight(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -387,19 +465,23 @@ func fnRight(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, er
 	if err != nil {
 		return nil, err
 	}
-	s := fmt.Sprintf("%v", val)
-	if str, ok := val.(string); ok {
-		s = str
+	s, err := ce.textArg(val)
+	if err != nil {
+		return nil, err
 	}
-	runes := []rune(s)
-	count := int(toFloat(n))
-	if count > len(runes) {
-		count = len(runes)
+	count, err := ce.mustNum(n)
+	if err != nil {
+		return nil, err
 	}
 	if count < 0 {
-		count = 0
+		return nil, fmt.Errorf("#VALUE!")
 	}
-	return string(runes[len(runes)-count:]), nil
+	runes := []rune(s)
+	k := int(count)
+	if k > len(runes) {
+		k = len(runes)
+	}
+	return string(runes[len(runes)-k:]), nil
 }
 
 func fnMid(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -419,16 +501,24 @@ func fnMid(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, erro
 	if err != nil {
 		return nil, err
 	}
-	s := fmt.Sprintf("%v", val)
-	if str, ok := val.(string); ok {
-		s = str
+	s, err := ce.textArg(val)
+	if err != nil {
+		return nil, err
+	}
+	startN, err := ce.mustNum(startVal)
+	if err != nil {
+		return nil, err
+	}
+	lengthN, err := ce.mustNum(lenVal)
+	if err != nil {
+		return nil, err
+	}
+	if startN < 1 || lengthN < 0 {
+		return nil, fmt.Errorf("#VALUE!")
 	}
 	runes := []rune(s)
-	start := int(toFloat(startVal)) - 1 // MID is 1-based
-	length := int(toFloat(lenVal))
-	if start < 0 {
-		start = 0
-	}
+	start := int(startN) - 1
+	length := int(lengthN)
 	if start >= len(runes) {
 		return "", nil
 	}
@@ -447,11 +537,11 @@ func fnConcatenate(ce *CalculationEngine, ws *Worksheet, args string) (interface
 		if err != nil {
 			return nil, err
 		}
-		if rg, ok := val.(*formulaRange); ok && len(rg.values) != 1 {
-			return nil, fmt.Errorf("#VALUE!")
-		}
-		sv, err := scalarValue(val)
+		sv, err := ce.asScalar(val)
 		if err != nil {
+			return nil, err
+		}
+		if err := excelError(sv); err != nil {
 			return nil, err
 		}
 		result += excelText(sv)
@@ -482,7 +572,10 @@ func fnSumIf(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, er
 	}
 
 	criteriaRange := parts[0]
-	criteria := strings.Trim(parts[1], `"`)
+	criteria, err := criterionOf(ce, ws, parts[1])
+	if err != nil {
+		return nil, err
+	}
 	sumRange := criteriaRange
 	if len(parts) == 3 {
 		sumRange = parts[2]
@@ -499,7 +592,7 @@ func fnSumIf(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, er
 
 	sum := 0.0
 	for i, cv := range criteriaVals {
-		if matchesCriteria(cv, criteria) && i < len(sumVals) {
+		if matchesCriterion(cv, criteria) && i < len(sumVals) {
 			sum += toFloat(sumVals[i])
 		}
 	}
@@ -513,7 +606,10 @@ func fnCountIf(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, 
 	}
 
 	rangeStr := parts[0]
-	criteria := strings.Trim(parts[1], `"`)
+	criteria, err := criterionOf(ce, ws, parts[1])
+	if err != nil {
+		return nil, err
+	}
 
 	values, err := ce.resolveRange(ws, rangeStr)
 	if err != nil {
@@ -522,7 +618,7 @@ func fnCountIf(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, 
 
 	count := 0.0
 	for _, v := range values {
-		if matchesCriteria(v, criteria) {
+		if matchesCriterion(v, criteria) {
 			count++
 		}
 	}
@@ -531,6 +627,37 @@ func fnCountIf(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, 
 
 // matchesCriteria checks if a value matches a criteria string.
 // Supports: exact match, ">N", "<N", ">=N", "<=N", "<>N"
+func criterionOf(ce *CalculationEngine, ws *Worksheet, expr string) (interface{}, error) {
+	v, err := ce.evaluate(ws, expr)
+	if err != nil {
+		msg := strings.ToUpper(strings.TrimSpace(err.Error()))
+		if isExcelError(msg) {
+			return excelFault(msg), nil
+		}
+		return nil, err
+	}
+	return ce.asScalar(v)
+}
+
+func matchesCriterion(value, crit interface{}) bool {
+	if f, ok := crit.(excelFault); ok {
+		g, ok := value.(excelFault)
+		return ok && strings.EqualFold(string(f), string(g))
+	}
+	if s, ok := crit.(string); ok {
+		return matchesCriteria(value, s)
+	}
+	if b, ok := crit.(bool); ok {
+		vb, vok := value.(bool)
+		return vok && vb == b
+	}
+	if n, ok := asNumber(crit, false); ok {
+		vn, vok := asNumber(value, false)
+		return vok && vn == n
+	}
+	return matchesCriteria(value, excelText(crit))
+}
+
 func matchesCriteria(value interface{}, criteria string) bool {
 	if strings.HasPrefix(criteria, ">=") {
 		threshold, err := strconv.ParseFloat(criteria[2:], 64)

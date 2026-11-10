@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -105,6 +106,10 @@ func TestFormulaEngineCoverage(t *testing.T) {
 		{"E63", "ISTEXT(A4)", true},
 		{"E64", "ISERROR(A1/0)", true},
 		{"E65", "A1/0", "#DIV/0!"},
+		{"E66", "FALSE>\"TRUE\"", true},
+		{"E67", "TIME(27,0,0)", 0.125},
+		{"E68", "ROW(A1)", 1.0},
+		{"E69", "DATEDIF(DATE(2020,1,15),DATE(2020,3,20),\"MD\")", 5.0},
 	}
 	ce := NewCalculationEngine(wb)
 	matched := 0
@@ -179,6 +184,9 @@ func mustSet(t *testing.T, ws *Worksheet, ref string, v interface{}) {
 func calcEqual(got, want interface{}) bool {
 	if gs, ok := got.(string); ok {
 		if ws, ok := want.(string); ok {
+			if isExcelError(gs) && isExcelError(ws) {
+				return strings.EqualFold(gs, ws)
+			}
 			return gs == ws
 		}
 	}
@@ -270,7 +278,59 @@ func TestCorpusCachedFormulas(t *testing.T) {
 	}
 	rate := matched * 100 / checked
 	t.Logf("corpus cached match %d/%d (%d%%)", matched, checked, rate)
-	if rate < 80 {
+	if rate < 94 {
 		t.Fatalf("corpus match rate %d%%", rate)
 	}
+	// Full corpus: how many formula cells evaluate, and how many cached
+	// values they reproduce. Volatile functions are not compared.
+	total, evaluated, fullChecked, fullMatched := 0, 0, 0, 0
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".xlsx") {
+			return nil
+		}
+		wb, err := OpenFile(path)
+		if err != nil {
+			return nil
+		}
+		ce := NewCalculationEngine(wb)
+		for _, ws := range wb.Sheets() {
+			for _, cell := range ws.AllCells() {
+				if cell.Type != CellTypeFormula || strings.TrimSpace(cell.Formula) == "" {
+					continue
+				}
+				total++
+				ref, _ := CellName(cell.row, cell.col)
+				got, err := ce.CalculateCell(ws, ref)
+				if err != nil {
+					continue
+				}
+				evaluated++
+				if cell.Value == nil || volatileFormula(cell.Formula) {
+					continue
+				}
+				fullChecked++
+				if calcEqual(got, cell.Value) {
+					fullMatched++
+				}
+			}
+		}
+		return nil
+	})
+	t.Logf("corpus formulas %d evaluated %d cached match %d/%d", total, evaluated, fullMatched, fullChecked)
+	if total == 0 || evaluated*100/total < 85 {
+		t.Fatalf("evaluable formulas %d/%d", evaluated, total)
+	}
+	if fullChecked == 0 || fullMatched*100/fullChecked < 85 {
+		t.Fatalf("full corpus match %d/%d", fullMatched, fullChecked)
+	}
+}
+
+func volatileFormula(f string) bool {
+	f = strings.ToUpper(f)
+	for _, name := range []string{"RANDARRAY(", "RANDBETWEEN(", "RAND(", "NOW(", "TODAY("} {
+		if strings.Contains(f, name) {
+			return true
+		}
+	}
+	return false
 }

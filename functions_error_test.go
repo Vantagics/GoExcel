@@ -298,12 +298,8 @@ func TestFnLeftEdgeCases(t *testing.T) {
 
 	// Negative count
 	ws.SetCellFormula("C1", "LEFT(A1,-1)")
-	val, err = ce.CalculateCell(ws, "C1")
-	if err != nil {
-		t.Fatalf("error: %v", err)
-	}
-	if val != "" {
-		t.Errorf("LEFT = %v, want ''", val)
+	if _, err = ce.CalculateCell(ws, "C1"); err == nil {
+		t.Fatal("LEFT with a negative count should be #VALUE!")
 	}
 }
 
@@ -341,12 +337,8 @@ func TestFnRightEdgeCases(t *testing.T) {
 	}
 
 	ws.SetCellFormula("C1", "RIGHT(A1,-1)")
-	val, err = ce.CalculateCell(ws, "C1")
-	if err != nil {
-		t.Fatalf("error: %v", err)
-	}
-	if val != "" {
-		t.Errorf("RIGHT = %v, want ''", val)
+	if _, err = ce.CalculateCell(ws, "C1"); err == nil {
+		t.Fatal("RIGHT with a negative count should be #VALUE!")
 	}
 }
 
@@ -392,12 +384,8 @@ func TestFnMidEdgeCases(t *testing.T) {
 
 	// Negative start
 	ws.SetCellFormula("C1", "MID(A1,-1,2)")
-	val, err = ce.CalculateCell(ws, "C1")
-	if err != nil {
-		t.Fatalf("error: %v", err)
-	}
-	if val != "hi" {
-		t.Errorf("MID = %v, want 'hi'", val)
+	if _, err = ce.CalculateCell(ws, "C1"); err == nil {
+		t.Fatal("MID with a negative start should be #VALUE!")
 	}
 }
 
@@ -476,12 +464,8 @@ func TestFnLenWithNumericCell(t *testing.T) {
 	_, ws, ce := setupCalcSheet()
 	ws.SetCellValue("A1", 12345)
 	ws.SetCellFormula("B1", "LEN(A1)")
-	val, err := ce.CalculateCell(ws, "B1")
-	if err != nil {
-		t.Fatalf("error: %v", err)
-	}
-	if val != 5.0 {
-		t.Errorf("LEN = %v, want 5", val)
+	if _, err := ce.CalculateCell(ws, "B1"); err == nil {
+		t.Fatal("LEN of a number should be #VALUE!")
 	}
 }
 

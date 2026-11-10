@@ -151,21 +151,42 @@ func fnSumProduct(ce *CalculationEngine, ws *Worksheet, args string) (interface{
 	}
 	cols := make([][]float64, len(parts))
 	n := -1
+	scalar := false
 	for i, part := range parts {
 		rg, err := ce.evalRange(ws, part)
 		if err != nil {
 			return nil, err
 		}
+		if err := rangeError(rg); err != nil {
+			return nil, err
+		}
+		if rg.cellCount() > 1 {
+			if n < 0 {
+				n = len(rg.values)
+			} else if len(rg.values) != n {
+				return nil, fmt.Errorf("#VALUE!")
+			}
+		} else {
+			scalar = true
+		}
 		nums := make([]float64, len(rg.values))
 		for j, v := range rg.values {
+			if err := excelError(v); err != nil {
+				return nil, err
+			}
 			if x, ok := asNumber(v, false); ok {
 				nums[j] = x
+			} else if v != nil && rg.cellCount() == 1 {
+				return nil, fmt.Errorf("#VALUE!")
 			}
 		}
 		cols[i] = nums
-		if n < 0 || len(nums) < n {
+		if n < 0 {
 			n = len(nums)
 		}
+	}
+	if scalar && n > 1 {
+		return nil, fmt.Errorf("#VALUE!")
 	}
 	sum := 0.0
 	for i := 0; i < n; i++ {
@@ -176,6 +197,18 @@ func fnSumProduct(ce *CalculationEngine, ws *Worksheet, args string) (interface{
 		sum += prod
 	}
 	return sum, nil
+}
+
+func rangeError(rg *formulaRange) error {
+	if rg == nil {
+		return nil
+	}
+	for _, v := range flattenAreas(rg) {
+		if err := excelError(v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func fnRoundUp(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -199,11 +232,11 @@ func roundDir(ce *CalculationEngine, ws *Worksheet, args string, up bool) (inter
 	if err != nil {
 		return nil, err
 	}
-	d, err := requireNumber(dig)
+	d, err := ce.mustNum(dig)
 	if err != nil {
 		return nil, err
 	}
-	n, err := requireNumber(val)
+	n, err := ce.mustNum(val)
 	if err != nil {
 		return nil, err
 	}
@@ -244,17 +277,20 @@ func ceilingFloor(ce *CalculationEngine, ws *Worksheet, args string, ceil bool) 
 		if err != nil {
 			return nil, err
 		}
-		sig, err = requireNumber(s)
+		sig, err = ce.mustNum(s)
 		if err != nil {
 			return nil, err
 		}
 	}
-	n, err := requireNumber(val)
+	n, err := ce.mustNum(val)
 	if err != nil {
 		return nil, err
 	}
 	if sig == 0 {
-		return 0.0, nil
+		if n == 0 {
+			return 0.0, nil
+		}
+		return nil, fmt.Errorf("#DIV/0!")
 	}
 	x := n / sig
 	if ceil {
@@ -268,7 +304,7 @@ func fnSign(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, err
 	if err != nil {
 		return nil, err
 	}
-	n, err := requireNumber(v)
+	n, err := ce.mustNum(v)
 	if err != nil {
 		return nil, err
 	}
@@ -479,6 +515,10 @@ func lookupHV(ce *CalculationEngine, ws *Worksheet, args string, vertical bool) 
 	if err != nil {
 		return nil, err
 	}
+	key, err = ce.asScalar(key)
+	if err != nil {
+		return nil, err
+	}
 	rg, err := ce.evalRange(ws, parts[1])
 	if err != nil {
 		return nil, err
@@ -487,7 +527,11 @@ func lookupHV(ce *CalculationEngine, ws *Worksheet, args string, vertical bool) 
 	if err != nil {
 		return nil, err
 	}
-	idx := int(toFloat(idxf))
+	idxN, err := ce.mustNum(idxf)
+	if err != nil {
+		return nil, err
+	}
+	idx := int(idxN)
 	approx := false
 	if len(parts) == 4 {
 		m, err := ce.evaluate(ws, parts[3])
@@ -556,22 +600,47 @@ func fnIndex(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, er
 	if err != nil {
 		return nil, err
 	}
-	row := int(toFloat(rowV))
+	rowN, err := ce.mustNum(rowV)
+	if err != nil {
+		return nil, err
+	}
+	row := int(rowN)
 	col := 1
 	if len(parts) == 3 {
 		colV, err := ce.evaluate(ws, parts[2])
 		if err != nil {
 			return nil, err
 		}
-		col = int(toFloat(colV))
+		colN, err := ce.mustNum(colV)
+		if err != nil {
+			return nil, err
+		}
+		col = int(colN)
 	}
-	if row < 1 {
-		row = 1
+	if row == 0 || (len(parts) == 3 && col == 0) {
+		r1, r2 := 0, rg.rows-1
+		c1, c2 := 0, rg.cols-1
+		if row > 0 {
+			if row > rg.rows {
+				return nil, fmt.Errorf("#REF!")
+			}
+			r1, r2 = row-1, row-1
+		}
+		if col > 0 {
+			if col > rg.cols {
+				return nil, fmt.Errorf("#REF!")
+			}
+			c1, c2 = col-1, col-1
+		}
+		vals := make([]interface{}, 0, (r2-r1+1)*(c2-c1+1))
+		for r := r1; r <= r2; r++ {
+			for c := c1; c <= c2; c++ {
+				vals = append(vals, rg.at(r, c))
+			}
+		}
+		return &formulaRange{values: vals, rows: r2 - r1 + 1, cols: c2 - c1 + 1, row0: rg.row0 + r1, col0: rg.col0 + c1, sheet: rg.sheet}, nil
 	}
-	if col < 1 {
-		col = 1
-	}
-	if row > rg.rows || col > rg.cols {
+	if row < 1 || col < 1 || row > rg.rows || col > rg.cols {
 		return nil, fmt.Errorf("#REF!")
 	}
 	return rg.values[(row-1)*rg.cols+col-1], nil
@@ -694,31 +763,47 @@ func fnOffset(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, e
 	if err != nil {
 		return nil, fmt.Errorf("#REF!")
 	}
-	rows, err := ce.evaluate(ws, parts[1])
+	rowV, err := ce.evaluate(ws, parts[1])
 	if err != nil {
 		return nil, err
 	}
-	cols, err := ce.evaluate(ws, parts[2])
+	colV, err := ce.evaluate(ws, parts[2])
+	if err != nil {
+		return nil, err
+	}
+	rowN, err := ce.mustNum(rowV)
+	if err != nil {
+		return nil, err
+	}
+	colN, err := ce.mustNum(colV)
 	if err != nil {
 		return nil, err
 	}
 	h, w := 1, 1
-	if len(parts) >= 4 {
+	if len(parts) >= 4 && strings.TrimSpace(parts[3]) != "" {
 		hv, err := ce.evaluate(ws, parts[3])
 		if err != nil {
 			return nil, err
 		}
-		h = int(toFloat(hv))
+		hn, err := ce.mustNum(hv)
+		if err != nil {
+			return nil, err
+		}
+		h = int(hn)
 	}
-	if len(parts) == 5 {
+	if len(parts) == 5 && strings.TrimSpace(parts[4]) != "" {
 		wv, err := ce.evaluate(ws, parts[4])
 		if err != nil {
 			return nil, err
 		}
-		w = int(toFloat(wv))
+		wn, err := ce.mustNum(wv)
+		if err != nil {
+			return nil, err
+		}
+		w = int(wn)
 	}
-	r := base.Row + int(toFloat(rows))
-	c := base.ColumnIdx + int(toFloat(cols))
+	r := base.Row + int(rowN)
+	c := base.ColumnIdx + int(colN)
 	if r < 1 || c < 0 || h < 1 || w < 1 {
 		return nil, fmt.Errorf("#REF!")
 	}
@@ -865,7 +950,7 @@ func fnSubstitute(ce *CalculationEngine, ws *Worksheet, args string) (interface{
 	}
 	inst := int(toFloat(instV))
 	if inst < 1 || old == "" {
-		return text, nil
+		return nil, fmt.Errorf("#VALUE!")
 	}
 	seen := 0
 	var b strings.Builder
@@ -908,12 +993,24 @@ func fnReplace(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, 
 	if err != nil {
 		return nil, err
 	}
-	runes := []rune(excelText(textV))
-	start := int(toFloat(startV)) - 1
-	n := int(toFloat(lenV))
-	if start < 0 {
-		start = 0
+	text, err := ce.textArg(textV)
+	if err != nil {
+		return nil, err
 	}
+	startN, err := ce.mustNum(startV)
+	if err != nil {
+		return nil, err
+	}
+	nlen, err := ce.mustNum(lenV)
+	if err != nil {
+		return nil, err
+	}
+	if startN < 1 || nlen < 0 {
+		return nil, fmt.Errorf("#VALUE!")
+	}
+	runes := []rune(text)
+	start := int(startN) - 1
+	n := int(nlen)
 	if start > len(runes) {
 		start = len(runes)
 	}
@@ -937,17 +1034,18 @@ func fnText(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, err
 	if err != nil {
 		return nil, err
 	}
-	code := excelText(fmtV)
-	if t, ok := val.(time.Time); ok {
-		return formatDateByCode(t, code), nil
+	sv, err := ce.asScalar(val)
+	if err != nil {
+		return nil, err
 	}
-	if n, ok := asNumber(val, true); ok {
-		if looksDateCode(code) {
-			return formatDateByCode(excelSerialToTime(n), code), nil
-		}
-		return formatNumberByCode(n, code), nil
+	if err := excelError(sv); err != nil {
+		return nil, err
 	}
-	return excelText(val), nil
+	code, err := ce.textArg(fmtV)
+	if err != nil {
+		return nil, err
+	}
+	return formatByExcelCode(sv, code), nil
 }
 
 func fnValue(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -997,28 +1095,53 @@ func fnNow(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, erro
 	return dateToSerial(time.Now().UTC()), nil
 }
 
+func dateParts(ce *CalculationEngine, ws *Worksheet, expr string) (year, month, day int, err error) {
+	v, err := ce.evaluate(ws, expr)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	sv, err := ce.asScalar(v)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if n, ok := asNumber(sv, true); ok {
+		if n < 0 {
+			return 0, 0, 0, fmt.Errorf("#NUM!")
+		}
+		if n == 0 {
+			return 1900, 1, 0, nil
+		}
+		t := excelSerialToTime(n)
+		return t.Year(), int(t.Month()), t.Day(), nil
+	}
+	if t, ok := sv.(time.Time); ok {
+		return t.Year(), int(t.Month()), t.Day(), nil
+	}
+	return 0, 0, 0, fmt.Errorf("#VALUE!")
+}
+
 func fnYear(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
-	t, err := evalDate(ce, ws, args)
+	y, _, _, err := dateParts(ce, ws, args)
 	if err != nil {
 		return nil, err
 	}
-	return float64(t.Year()), nil
+	return float64(y), nil
 }
 
 func fnMonth(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
-	t, err := evalDate(ce, ws, args)
+	_, m, _, err := dateParts(ce, ws, args)
 	if err != nil {
 		return nil, err
 	}
-	return float64(t.Month()), nil
+	return float64(m), nil
 }
 
 func fnDay(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
-	t, err := evalDate(ce, ws, args)
+	_, _, d, err := dateParts(ce, ws, args)
 	if err != nil {
 		return nil, err
 	}
-	return float64(t.Day()), nil
+	return float64(d), nil
 }
 
 func fnEDate(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -1072,6 +1195,9 @@ func fnDateDif(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, 
 	if err != nil {
 		return nil, err
 	}
+	if end.Before(start) {
+		return nil, fmt.Errorf("#NUM!")
+	}
 	switch strings.ToUpper(excelText(unitV)) {
 	case "Y":
 		y := end.Year() - start.Year()
@@ -1086,10 +1212,36 @@ func fnDateDif(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, 
 		}
 		return float64(m), nil
 	case "D":
-		return math.Floor(end.Sub(start).Hours() / 24), nil
+		return dateDiffDays(start, end), nil
+	case "MD":
+		d := end.Day() - start.Day()
+		if d < 0 {
+			prev := time.Date(end.Year(), end.Month(), 0, 0, 0, 0, 0, time.UTC)
+			d += prev.Day()
+		}
+		return float64(d), nil
+	case "YM":
+		m := int(end.Month()) - int(start.Month())
+		if end.Day() < start.Day() {
+			m--
+		}
+		if m < 0 {
+			m += 12
+		}
+		return float64(m), nil
+	case "YD":
+		s := time.Date(end.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
+		if s.After(end) {
+			s = time.Date(end.Year()-1, start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
+		}
+		return dateDiffDays(s, end), nil
 	default:
 		return nil, fmt.Errorf("#NUM!")
 	}
+}
+
+func dateDiffDays(start, end time.Time) float64 {
+	return math.Floor(end.Sub(start).Hours()/24 + 1e-9)
 }
 
 func fnWeekday(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -1119,16 +1271,15 @@ func fnNetWorkDays(ce *CalculationEngine, ws *Worksheet, args string) (interface
 	if err != nil {
 		return nil, err
 	}
-	if end.Before(start) {
-		start, end = end, start
-	}
-	n := 0.0
-	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
-		if d.Weekday() != time.Saturday && d.Weekday() != time.Sunday {
-			n++
+	weekend := [7]bool{time.Sunday: true, time.Saturday: true}
+	var holidays []time.Time
+	if len(parts) >= 3 {
+		holidays, err = holidayList(ce, ws, parts[2])
+		if err != nil {
+			return nil, err
 		}
 	}
-	return n, nil
+	return float64(networkDayCount(start, end, weekend, holidays)), nil
 }
 
 func fnWorkday(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -1144,20 +1295,19 @@ func fnWorkday(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, 
 	if err != nil {
 		return nil, err
 	}
-	left := int(toFloat(daysV))
-	step := 1
-	if left < 0 {
-		step = -1
-		left = -left
+	daysN, err := ce.mustNum(daysV)
+	if err != nil {
+		return nil, err
 	}
-	d := start
-	for left > 0 {
-		d = d.AddDate(0, 0, step)
-		if d.Weekday() != time.Saturday && d.Weekday() != time.Sunday {
-			left--
+	weekend := [7]bool{time.Sunday: true, time.Saturday: true}
+	var holidays []time.Time
+	if len(parts) >= 3 {
+		holidays, err = holidayList(ce, ws, parts[2])
+		if err != nil {
+			return nil, err
 		}
 	}
-	return dateToSerial(d), nil
+	return dateToSerial(workdayShift(start, int(daysN), weekend, holidays)), nil
 }
 
 func fnIsBlank(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -1165,7 +1315,11 @@ func fnIsBlank(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, 
 	if err != nil {
 		return false, nil
 	}
-	return v == nil, nil
+	sv, err := ce.asScalar(v)
+	if err != nil {
+		return false, nil
+	}
+	return sv == nil, nil
 }
 
 func fnIsNumber(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -1173,7 +1327,11 @@ func fnIsNumber(ce *CalculationEngine, ws *Worksheet, args string) (interface{},
 	if err != nil {
 		return false, nil
 	}
-	_, ok := asNumber(v, false)
+	sv, err := ce.asScalar(v)
+	if err != nil {
+		return false, nil
+	}
+	_, ok := asNumber(sv, false)
 	return ok, nil
 }
 
@@ -1182,8 +1340,12 @@ func fnIsText(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, e
 	if err != nil {
 		return false, nil
 	}
-	_, ok := v.(string)
-	if ok && isExcelError(v.(string)) {
+	sv, err := ce.asScalar(v)
+	if err != nil {
+		return false, nil
+	}
+	_, ok := sv.(string)
+	if ok && excelError(sv) != nil {
 		return false, nil
 	}
 	return ok, nil
@@ -1194,7 +1356,11 @@ func fnIsError(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, 
 	if err != nil {
 		return true, nil
 	}
-	return excelError(v) != nil, nil
+	sv, err := ce.asScalar(v)
+	if err != nil {
+		return true, nil
+	}
+	return excelError(sv) != nil, nil
 }
 
 func fnIsNA(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, error) {
@@ -1202,7 +1368,14 @@ func fnIsNA(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, err
 	if err != nil {
 		return strings.Contains(strings.ToUpper(err.Error()), "#N/A"), nil
 	}
-	s, ok := v.(string)
+	sv, err := ce.asScalar(v)
+	if err != nil {
+		return false, nil
+	}
+	if f, ok := sv.(excelFault); ok {
+		return strings.EqualFold(string(f), "#N/A"), nil
+	}
+	s, ok := sv.(string)
 	return ok && strings.EqualFold(s, "#N/A"), nil
 }
 
@@ -1255,6 +1428,9 @@ func evalDate(ce *CalculationEngine, ws *Worksheet, expr string) (time.Time, err
 		return t, nil
 	default:
 		if n, ok := asNumber(v, true); ok {
+			if n < 0 {
+				return time.Time{}, fmt.Errorf("#NUM!")
+			}
 			return excelSerialToTime(n), nil
 		}
 		return time.Time{}, fmt.Errorf("#VALUE!")

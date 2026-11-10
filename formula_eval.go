@@ -2,23 +2,55 @@ package gospreadsheet
 
 import (
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 )
 
 // formulaRange is a row-major list of cell values, including blanks (nil).
+// row0 and col0 are the 0-based origin on sheet. virtual ranges are computed
+// arrays (FILTER, arithmetic) rather than a sheet rectangle.
 type formulaRange struct {
-	values []interface{}
-	rows   int
-	cols   int
+	values  []interface{}
+	rows    int
+	cols    int
+	row0    int
+	col0    int
+	sheet   *Worksheet
+	virtual bool
+	areas   []*formulaRange
+}
+
+func (rg *formulaRange) at(r, c int) interface{} {
+	if rg == nil || r < 0 || c < 0 || r >= rg.rows || c >= rg.cols {
+		return nil
+	}
+	i := r*rg.cols + c
+	if i < 0 || i >= len(rg.values) {
+		return nil
+	}
+	return rg.values[i]
+}
+
+func (rg *formulaRange) cellCount() int {
+	if rg == nil {
+		return 0
+	}
+	if len(rg.areas) > 0 {
+		n := 0
+		for _, a := range rg.areas {
+			n += a.cellCount()
+		}
+		return n
+	}
+	return rg.rows * rg.cols
 }
 
 type formulaParser struct {
-	ce *CalculationEngine
-	ws *Worksheet
-	s  string
-	i  int
+	ce      *CalculationEngine
+	ws      *Worksheet
+	s       string
+	i       int
+	inArray bool
 }
 
 func (p *formulaParser) skip() {
@@ -56,21 +88,10 @@ func (p *formulaParser) parseCompare() (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := excelError(left); err != nil {
-			return nil, err
-		}
-		if err := excelError(right); err != nil {
-			return nil, err
-		}
-		ls, err := scalarValue(left)
+		left, err = p.bin(left, right, op)
 		if err != nil {
 			return nil, err
 		}
-		rs, err := scalarValue(right)
-		if err != nil {
-			return nil, err
-		}
-		left = compareValues(ls, rs, op)
 	}
 }
 
@@ -89,21 +110,10 @@ func (p *formulaParser) parseConcat() (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := excelError(left); err != nil {
-			return nil, err
-		}
-		if err := excelError(right); err != nil {
-			return nil, err
-		}
-		ls, err := scalarValue(left)
+		left, err = p.bin(left, right, "&")
 		if err != nil {
 			return nil, err
 		}
-		rs, err := scalarValue(right)
-		if err != nil {
-			return nil, err
-		}
-		left = excelText(ls) + excelText(rs)
 	}
 }
 
@@ -123,27 +133,10 @@ func (p *formulaParser) parseAdd() (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		ls, err := scalarValue(left)
+		left, err = p.bin(left, right, op)
 		if err != nil {
 			return nil, err
 		}
-		rs, err := scalarValue(right)
-		if err != nil {
-			return nil, err
-		}
-		ln, err := arithNumber(ls)
-		if err != nil {
-			return nil, err
-		}
-		rn, err := arithNumber(rs)
-		if err != nil {
-			return nil, err
-		}
-		n, err := applyOp(ln, rn, op)
-		if err != nil {
-			return nil, err
-		}
-		left = n
 	}
 }
 
@@ -163,27 +156,10 @@ func (p *formulaParser) parseMul() (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		ls, err := scalarValue(left)
+		left, err = p.bin(left, right, op)
 		if err != nil {
 			return nil, err
 		}
-		rs, err := scalarValue(right)
-		if err != nil {
-			return nil, err
-		}
-		ln, err := arithNumber(ls)
-		if err != nil {
-			return nil, err
-		}
-		rn, err := arithNumber(rs)
-		if err != nil {
-			return nil, err
-		}
-		n, err := applyOp(ln, rn, op)
-		if err != nil {
-			return nil, err
-		}
-		left = n
 	}
 }
 
@@ -199,27 +175,7 @@ func (p *formulaParser) parsePow() (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		ls, err := scalarValue(left)
-		if err != nil {
-			return nil, err
-		}
-		rs, err := scalarValue(right)
-		if err != nil {
-			return nil, err
-		}
-		ln, err := arithNumber(ls)
-		if err != nil {
-			return nil, err
-		}
-		rn, err := arithNumber(rs)
-		if err != nil {
-			return nil, err
-		}
-		pow := math.Pow(ln, rn)
-		if math.IsNaN(pow) || math.IsInf(pow, 0) {
-			return nil, fmt.Errorf("#NUM!")
-		}
-		return pow, nil
+		return p.bin(left, right, "^")
 	}
 	return left, nil
 }
@@ -233,7 +189,7 @@ func (p *formulaParser) parseUnary() (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		sv, err := scalarValue(v)
+		sv, err := p.ce.asScalar(v)
 		if err != nil {
 			return nil, err
 		}
@@ -253,7 +209,7 @@ func (p *formulaParser) parseUnary() (interface{}, error) {
 	p.skip()
 	if p.i < len(p.s) && p.s[p.i] == '%' {
 		p.i++
-		sv, err := scalarValue(v)
+		sv, err := p.ce.asScalar(v)
 		if err != nil {
 			return nil, err
 		}
@@ -267,9 +223,34 @@ func (p *formulaParser) parseUnary() (interface{}, error) {
 }
 
 func (p *formulaParser) parsePrimary() (interface{}, error) {
+	v, err := p.parseAtom()
+	if err != nil {
+		return nil, err
+	}
+	if lam, ok := v.(*lambdaVal); ok {
+		p.skip()
+		if p.i < len(p.s) && p.s[p.i] == '(' {
+			return p.callLambda(lam)
+		}
+	}
+	return p.parseRefOps(v)
+}
+
+func (p *formulaParser) parseAtom() (interface{}, error) {
 	p.skip()
 	if p.i >= len(p.s) {
 		return nil, fmt.Errorf("unexpected end of formula")
+	}
+	if p.s[p.i] == '@' {
+		p.i++
+		v, err := p.parseAtom()
+		if err != nil {
+			return nil, err
+		}
+		return p.ce.asScalar(v)
+	}
+	if p.s[p.i] == '{' {
+		return p.parseArrayConst()
 	}
 	if p.s[p.i] == '(' {
 		p.i++
@@ -367,8 +348,16 @@ func (p *formulaParser) parseRefOrCall() (interface{}, error) {
 	}
 	name := p.s[start:p.i]
 	p.skip()
+	if p.i < len(p.s) && p.s[p.i] == '[' {
+		return p.parseStructured(name)
+	}
 	if p.i < len(p.s) && p.s[p.i] == '(' {
 		return p.parseCall(name)
+	}
+	if p.ce.locals != nil {
+		if v, ok := p.ce.locals[strings.ToUpper(name)]; ok {
+			return v, nil
+		}
 	}
 	upper := strings.ToUpper(name)
 	if upper == "TRUE" {
@@ -546,7 +535,7 @@ func (ce *CalculationEngine) readArea(ws *Worksheet, body string) (*formulaRange
 			vals = append(vals, v)
 		}
 	}
-	return &formulaRange{values: vals, rows: rows, cols: cols}, nil
+	return &formulaRange{values: vals, rows: rows, cols: cols, row0: r1 - 1, col0: c1, sheet: ws}, nil
 }
 
 func (ce *CalculationEngine) resolveRef(ws *Worksheet, ref string) (*Worksheet, string, error) {

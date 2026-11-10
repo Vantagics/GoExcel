@@ -424,6 +424,36 @@ The corpus sample is `FormulaEvalTestData_Copy.xlsx`, `shared_formulas.xlsx`, `r
 
 `go test ./...` passes. `python3 scripts/diffharness.py --roundtrip` on the full corpus (266 workbooks): **0 content defects**.
 
+## Round 16 — array formulas, tables, and closer cache agreement
+
+The round 15 engine matched 560 of 653 cached values on the formula sample (85%) and could evaluate 7,415 of 9,280 formula cells in the full corpus.
+
+### What changed
+
+- Implicit intersection for a range used as a scalar, plus explicit `@` / `SINGLE`. Legacy CSE array formulas (`t="array"`) evaluate element-wise and return the cell's slot. Array constants `{1,2;3,4}` parse. Operators on ranges are element-wise inside an array formula.
+- Dynamic arrays: `FILTER`, `SORT`, `SORTBY`, `UNIQUE`, `SEQUENCE`, `TRANSPOSE`, `LET`, `LAMBDA`. The anchor cell returns the first value. `RANDARRAY` is implemented and left out of the cache comparison because it is volatile.
+- Structured references read `xl/tables`: `Table[Col]`, `[#Headers]`, `[#Totals]`, `[#This Row]`, `[@Col]`, `[#Data]`, `[#All]`.
+- Space is intersection (`#NULL!` when the ranges miss). Comma between references is union.
+- `NETWORKDAYS` and `WORKDAY` take a holiday list. `NETWORKDAYS.INTL` and `WORKDAY.INTL` take the weekend code or a 7-character mask.
+- `DATEDIF` accepts `Y`, `M`, `D`, `MD`, `YM`, and `YD`.
+- Comparisons use Excel's order: number, then text, then boolean. `FALSE>"TRUE"` is true. Equality still does not coerce a number and a non-empty string.
+- Error cells inside a range are real errors (`#DIV/0!`, `#N/A`, …) instead of text. `SUM` propagates them. `COUNT` skips them.
+- Added the functions that showed up most often as `#NAME?`: `COLUMN`, `ROW`, `SUBTOTAL`, `AGGREGATE`, `CEILING.MATH`, `FLOOR.MATH`, the common trig and statistics functions, `PMT`/`PV`/`FV`/`NPV`/`NPER`, `LARGE`/`SMALL`/`MODE`, `ADDRESS`, `CLEAN`, `REPT`, `LOOKUP`, `COUNTBLANK`, `AVERAGEA`, `DAYS360`, `TIME`/`HOUR`/`MINUTE`/`SECOND`, and `NA`.
+
+### Agreement
+
+| Check | Before this round | After |
+| --- | --- | --- |
+| Engine, generated workbook | 65/65 | 69/69 |
+| LibreOffice Calc 24.2 on that workbook | 63/65 | 66/69 |
+| Sample workbooks, cached values among formulas the engine evaluates | 560/653 (85%) | 1051/1087 (96%) |
+| Full corpus formula cells the engine evaluates | 7415/9280 | 8410/9280 (90.6%) |
+| Full corpus cached values among those | 6353/7402 (86%) | 7324/8393 (87.2%) |
+
+The sample is `FormulaEvalTestData_Copy.xlsx`, `shared_formulas.xlsx`, `r11/xw-sales.xlsx`, `r12/ej-fibonacci.xlsx`, `r13/ps-sharedformula.xlsx`, and `r13/npoi-matrix.xlsx`. `RAND`, `RANDBETWEEN`, `RANDARRAY`, `NOW`, and `TODAY` are not part of the cache comparison.
+
+`go test ./...` passes. The file round-trip of the corpus is unchanged by the calculation engine.
+
 ## Remaining known gaps
 
 - openpyxl and POI do not read strict OOXML (POI bug 57699). goexcel reads it and can write it when asked. LibreOffice Calc opens a strict file written by goexcel.
@@ -435,7 +465,7 @@ The corpus sample is `FormulaEvalTestData_Copy.xlsx`, `shared_formulas.xlsx`, `r
 - Extensible encryption is an external cipher provider. It is not implemented.
 - LibreOffice's refresh ignores pivot `fieldGroup`, so date and numeric groups stay as the precomputed cache labels in goexcel and become the base values after a LibreOffice recalc. Average and max can disappear in LibreOffice's compact layout.
 - `PivotFilter.Include` is an allow-list. A numeric field that is only a data field (not on an axis) has no discrete items to filter.
-- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. `OpenRows` applies formats only when `WithFormattedValues` is set. The calculation engine covers the functions listed in round 15. Array formulas, dynamic arrays, structured table references, the intersection (space) and union (comma) operators, and the rest of the Excel function set stay on `fullCalcOnLoad` for Excel. `DATEDIF` accepts `Y`, `M`, and `D` only. `NETWORKDAYS` and `WORKDAY` skip Saturday and Sunday and do not take a holiday list. `CEILING` and `FLOOR` are the significance forms. LibreOffice 24.2 still returns `#NAME?` for `_xlfn.XLOOKUP` and `#VALUE!` for `SUM` of a defined name that this engine evaluates. Corpus formulas that remain off the cached-value match are mostly array-style ranges used as scalars, bool-versus-text ordering (`FALSE>"TRUE"`), and a few aggregates whose Excel result depends on array evaluation.
+- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. `OpenRows` applies formats only when `WithFormattedValues` is set. The calculation engine covers the functions in rounds 15 and 16. A dynamic-array formula returns its first value from the anchor; neighboring spill cells are not written. `RANDARRAY` is volatile and is not compared with cached values. `MMULT`, `MDETERM`, and `MINVERSE` are not implemented. About 710 cached `TEXT` results in the POI number-format suites still differ: elapsed `[h]`/`[m]`/`[s]` codes, conditional sections such as `[>10]`, and unusual scientific patterns. Other cache misses are approximate `HLOOKUP`, `DATE` of components outside a normal year, and aggregates whose inputs are themselves formulas with a different cached result. LibreOffice 24.2 still returns `#NAME?` for `_xlfn.XLOOKUP` and `#VALUE!` for `SUM` of a defined name that this engine evaluates. Unknown functions still rely on `fullCalcOnLoad`.
 - LibreOffice 24.2 reports `#NAME?` for `_xlfn.UNIQUE` and recalculates some cached formula results (the 4,000-row sheet's cached `0` becomes the computed total). Its converter stored `IF(A1>1,"yes","no")` as numeric 0. Those are recalc gaps. openpyxl still refuses a workbook whose relationship points at a missing `xl/sharedStrings.xml`.
 - `OpenFile` of `testdata/perf/ej-huge.xlsx` retains about 198MB after the sheet is loaded (peak about 415MB while parsing). `OpenRows` stays near 33MB. The file stays outside `make diffcheck`. Worksheets larger than 1MB of XML are not parsed until a cell is read.
 - Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells. `AddSlicer` still attaches a slicer to a pivot created with `AddPivotTable` or `BuildPivotTable`.
