@@ -43,7 +43,12 @@ def norm_formula(f: str) -> str:
         if f.startswith("="):
             f = f[1:]
     f = f.replace("\r\n", "\n").replace("\r", "\n")
-    return re.sub(r"\s+", "", f).upper()
+    f = re.sub(r"\s+", "", f).upper()
+    # POI expands a whole-row reference 5:6 to $A5:$XFD6 and a whole-column
+    # reference F:G to F$1:G$1048576. Those are the same ranges.
+    f = re.sub(r"\$?A(\d+):\$?XFD(\d+)", lambda m: f"{m.group(1)}:{m.group(2)}", f)
+    f = re.sub(r"([A-Z]{1,3})\$1:([A-Z]{1,3})\$1048576", lambda m: f"{m.group(1)}:{m.group(2)}", f)
+    return f
 
 
 def norm_ref(ref: str) -> str:
@@ -92,10 +97,22 @@ def values_equal(a, b) -> bool:
         return abs(delta - 86400) <= 2 and min(da, db) < dt.datetime(1900, 3, 1)
     # A date on one side and an Excel serial on the other.
     if da and isinstance(b, (int, float)) and not isinstance(b, bool):
-        return abs((da - serial_to_dt(float(b))).total_seconds()) <= 2
+        return serial_matches(da, float(b))
     if db and isinstance(a, (int, float)) and not isinstance(a, bool):
-        return serial_close(float(a), db)
+        return serial_matches(db, float(a))
     return norm_text(str(a)) == norm_text(str(b))
+
+
+def serial_matches(when: dt.datetime, serial: float) -> bool:
+    """A datetime and an Excel serial are the same value in either date system.
+
+    serial_close covers the 1900 epoch, including POI's one-day shift for
+    serials before the fictional 1900-02-29. The 1904 epoch is 1904-01-01.
+    """
+    if serial_close(serial, when):
+        return True
+    epoch1904 = dt.datetime(1904, 1, 1) + dt.timedelta(days=serial)
+    return abs((when - epoch1904).total_seconds()) <= 2
 
 
 def clock_fraction(v):
@@ -689,6 +706,8 @@ def main() -> int:
                 gaps.append(issue + " (openpyxl does not read strict OOXML)")
             elif ("/poi:" in issue) and "value '" in issue and issue.endswith("vs ''"):
                 gaps.append(issue + " (POI dropped a shared-string index with trailing whitespace)")
+            elif "/poi:" in issue and " value True vs False" in issue:
+                gaps.append(issue + " (POI treats only the boolean token 1 as true; true/TRUE are booleans)")
             elif issue.startswith("read/libreoffice: convert failed"):
                 gaps.append(issue + " (LibreOffice crashed importing the original workbook)")
             elif issue.startswith("roundtrip/libreoffice: convert failed") and lo_original_crash:

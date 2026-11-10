@@ -565,6 +565,8 @@ Formulas support arithmetic operators: `+`, `-`, `*`, `/`, as well as cell refer
 | `(*Worksheet) FormulaAt(ref string) (formula, arrayRef string, err error)` | Formula Excel would show, plus the array ref when the cell is covered by one. |
 | `(*Cell) ArrayRef / IsArrayFormula / ReportedFormula` | Anchor ref and the formula bar text, including for cells that only belong to the ref. |
 | `(*Worksheet) SparklineGroups / SetSparklineGroups` | Read or replace sparkline groups (type, markers, colors, formula, cell). |
+| `(*Worksheet) AddPivotTable(name, source, dest, rowField, dataField string)` | Builds a pivot cache from a range and a pivot table at `dest`. |
+| `(*Worksheet) AddSlicer(pivotName, field, caption string)` | Creates a slicer and slicer cache for a field of a pivot on this sheet. |
 | `(*Worksheet) PivotTables` | Pivot name, location, data caption, style, fields. `SetName`, `SetLocation`, `SetDataCaption`, `SetStyle` write those attributes back. |
 | `(*Worksheet) Slicers` / `(*Workbook) SlicerCaches` | Caption, style, column count, row height, and cache source name. |
 

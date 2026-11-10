@@ -5,7 +5,9 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/md5"
 	"crypto/rand"
+	"crypto/rc4"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -144,13 +146,31 @@ func decryptEncryptedPackage(info, pkg []byte, password string) ([]byte, error) 
 	switch {
 	case major == 4 && minor == 4:
 		return decryptAgile(info[8:], pkg, password)
+	case major == 1 && minor == 1:
+		return decryptBinaryRC4(info, pkg, password)
 	case (major == 2 || major == 3 || major == 4) && minor == 2:
-		return decryptStandard(info[4:], pkg, password)
+		return decryptVersion22(info[4:], pkg, password)
 	case (major == 3 || major == 4) && minor == 3:
-		return nil, errors.New("gospreadsheet: extensible encryption is not supported")
+		return nil, errors.New("gospreadsheet: extensible encryption is not supported: the cipher is supplied by an external provider and is not defined by ECMA-376")
 	default:
 		return nil, fmt.Errorf("gospreadsheet: unsupported EncryptionInfo version %d.%d", major, minor)
 	}
+}
+
+// decryptVersion22 handles Office encryption version *.2. The AES flag selects
+// ECMA-376 standard encryption; otherwise the cipher is RC4 CryptoAPI.
+func decryptVersion22(rest, pkg []byte, password string) ([]byte, error) {
+	if len(rest) < 8 {
+		return nil, errors.New("gospreadsheet: encryption header is truncated")
+	}
+	flags := binary.LittleEndian.Uint32(rest[0:])
+	if flags&0x10 != 0 {
+		return nil, errors.New("gospreadsheet: extensible encryption (fExternal) is not supported: the cipher is supplied by an external provider")
+	}
+	if flags&0x20 != 0 {
+		return decryptStandard(rest, pkg, password)
+	}
+	return decryptCryptoAPI(rest, pkg, password)
 }
 
 type agileInfo struct {
@@ -437,6 +457,289 @@ func uint32Bytes(v uint32) []byte {
 	var b [4]byte
 	binary.LittleEndian.PutUint32(b[:], v)
 	return b[:]
+}
+
+func decryptBinaryRC4(info, pkg []byte, password string) ([]byte, error) {
+	if len(info) < 4+48 {
+		return nil, errors.New("gospreadsheet: binary RC4 EncryptionInfo is truncated")
+	}
+	salt := info[4:20]
+	encVerifier := info[20:36]
+	encHash := info[36:52]
+	password = clipPassword(password)
+	key := binaryRC4BlockKey(password, salt, 0)
+	c, err := rc4.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	verifier := make([]byte, 16)
+	gotHash := make([]byte, 16)
+	c.XORKeyStream(verifier, encVerifier)
+	c.XORKeyStream(gotHash, encHash)
+	sum := md5.Sum(verifier)
+	if !hmac.Equal(sum[:], gotHash) {
+		return nil, ErrWrongPassword
+	}
+	plain, err := decryptRC4Chunks(pkg, func(block int) []byte {
+		return binaryRC4BlockKey(password, salt, block)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return plain, nil
+}
+
+func binaryRC4BlockKey(password string, salt []byte, block int) []byte {
+	h := md5.New()
+	h.Write(utf16LE(password))
+	trunc := h.Sum(nil)[:5]
+	h.Reset()
+	for i := 0; i < 16; i++ {
+		h.Write(trunc)
+		h.Write(salt)
+	}
+	trunc = h.Sum(nil)[:5]
+	h.Reset()
+	h.Write(trunc)
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], uint32(block))
+	h.Write(b[:])
+	return h.Sum(nil)[:16]
+}
+
+func decryptCryptoAPI(rest, pkg []byte, password string) ([]byte, error) {
+	if len(rest) < 8 {
+		return nil, errors.New("gospreadsheet: RC4 CryptoAPI EncryptionInfo is truncated")
+	}
+	headerSize := binary.LittleEndian.Uint32(rest[4:])
+	if uint32(len(rest)) < 8+headerSize+40 {
+		return nil, errors.New("gospreadsheet: RC4 CryptoAPI EncryptionInfo is truncated")
+	}
+	header := rest[8 : 8+headerSize]
+	verifier := rest[8+headerSize:]
+	if len(header) < 20 || len(verifier) < 40 {
+		return nil, errors.New("gospreadsheet: RC4 CryptoAPI EncryptionInfo is truncated")
+	}
+	keySize := binary.LittleEndian.Uint32(header[16:])
+	if keySize == 0 {
+		keySize = 40
+	}
+	saltSize := binary.LittleEndian.Uint32(verifier[0:])
+	if saltSize != 16 || len(verifier) < int(4+saltSize+16+4+20) {
+		return nil, errors.New("gospreadsheet: RC4 CryptoAPI verifier is truncated")
+	}
+	salt := append([]byte(nil), verifier[4:4+saltSize]...)
+	encVerifier := verifier[4+saltSize : 4+saltSize+16]
+	hashSize := binary.LittleEndian.Uint32(verifier[4+saltSize+16:])
+	hashOff := 4 + saltSize + 16 + 4
+	if hashSize == 0 || int(hashOff+hashSize) > len(verifier) {
+		hashSize = 20
+	}
+	if int(hashOff+hashSize) > len(verifier) {
+		return nil, errors.New("gospreadsheet: RC4 CryptoAPI verifier is truncated")
+	}
+	encHash := verifier[hashOff : hashOff+hashSize]
+	password = clipPassword(password)
+	key := cryptoAPIBlockKey(password, salt, int(keySize), 0)
+	c, err := rc4.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	verifierPlain := make([]byte, len(encVerifier))
+	hashPlain := make([]byte, len(encHash))
+	c.XORKeyStream(verifierPlain, encVerifier)
+	c.XORKeyStream(hashPlain, encHash)
+	sum := sha1.Sum(verifierPlain)
+	n := len(hashPlain)
+	if n > sha1.Size {
+		n = sha1.Size
+	}
+	if !hmac.Equal(sum[:n], hashPlain[:n]) {
+		return nil, ErrWrongPassword
+	}
+	return decryptRC4Chunks(pkg, func(block int) []byte {
+		return cryptoAPIBlockKey(password, salt, int(keySize), block)
+	})
+}
+
+func cryptoAPIBlockKey(password string, salt []byte, keyBits, block int) []byte {
+	h := sha1.New()
+	h.Write(salt)
+	h.Write(utf16LE(password))
+	secret := h.Sum(nil)
+	h.Reset()
+	h.Write(secret)
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], uint32(block))
+	h.Write(b[:])
+	sum := h.Sum(nil)
+	n := keyBits / 8
+	if n <= 0 || n > len(sum) {
+		n = 5
+	}
+	if keyBits == 40 {
+		key := make([]byte, 16)
+		copy(key, sum[:5])
+		return key
+	}
+	return append([]byte(nil), sum[:n]...)
+}
+
+// decryptRC4Chunks decrypts an EncryptedPackage. ECMA-376 and POI's binary
+// RC4 writer prefix the ciphertext with the plaintext size. Some CryptoAPI
+// writers omit that prefix; both layouts are accepted.
+func decryptRC4Chunks(pkg []byte, keyFn func(block int) []byte) ([]byte, error) {
+	if len(pkg) >= 8 {
+		total := binary.LittleEndian.Uint64(pkg[:8])
+		if total > 0 && total < 1<<32 && int(total) <= len(pkg)-8 {
+			out, err := rc4Chunk(pkg[8:], keyFn, int(total))
+			if err == nil && looksLikeZip(out) {
+				return out, nil
+			}
+		}
+	}
+	out, err := rc4Chunk(pkg, keyFn, len(pkg))
+	if err != nil {
+		return nil, err
+	}
+	if !looksLikeZip(out) {
+		return nil, ErrWrongPassword
+	}
+	return out, nil
+}
+
+func rc4Chunk(cipherText []byte, keyFn func(block int) []byte, total int) ([]byte, error) {
+	if total > len(cipherText) {
+		total = len(cipherText)
+	}
+	out := make([]byte, 0, total)
+	for block, off := 0, 0; off < total; block++ {
+		n := 512
+		if n > total-off {
+			n = total - off
+		}
+		c, err := rc4.NewCipher(keyFn(block))
+		if err != nil {
+			return nil, err
+		}
+		chunk := make([]byte, n)
+		c.XORKeyStream(chunk, cipherText[off:off+n])
+		out = append(out, chunk...)
+		off += n
+	}
+	return out, nil
+}
+
+func looksLikeZip(b []byte) bool {
+	return len(b) >= 4 && b[0] == 'P' && b[1] == 'K'
+}
+
+func clipPassword(password string) string {
+	r := []rune(password)
+	if len(r) > 255 {
+		return string(r[:255])
+	}
+	return password
+}
+
+func encryptBinaryRC4Package(plain []byte, password string) ([]byte, error) {
+	salt := make([]byte, 16)
+	verifier := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, err
+	}
+	if _, err := io.ReadFull(rand.Reader, verifier); err != nil {
+		return nil, err
+	}
+	password = clipPassword(password)
+	key := binaryRC4BlockKey(password, salt, 0)
+	c, err := rc4.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	encVerifier := make([]byte, 16)
+	c.XORKeyStream(encVerifier, verifier)
+	sum := md5.Sum(verifier)
+	encHash := make([]byte, 16)
+	c.XORKeyStream(encHash, sum[:])
+	info := make([]byte, 4+48)
+	binary.LittleEndian.PutUint16(info[0:], 1)
+	binary.LittleEndian.PutUint16(info[2:], 1)
+	copy(info[4:], salt)
+	copy(info[20:], encVerifier)
+	copy(info[36:], encHash)
+	body := rc4EncryptChunks(plain, func(block int) []byte {
+		return binaryRC4BlockKey(password, salt, block)
+	})
+	return writeCFBPackage(info, body)
+}
+
+func encryptCryptoAPIPackage(plain []byte, password string) ([]byte, error) {
+	const keyBits = 40
+	salt := make([]byte, 16)
+	verifier := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, err
+	}
+	if _, err := io.ReadFull(rand.Reader, verifier); err != nil {
+		return nil, err
+	}
+	password = clipPassword(password)
+	key := cryptoAPIBlockKey(password, salt, keyBits, 0)
+	c, err := rc4.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	encVerifier := make([]byte, 16)
+	c.XORKeyStream(encVerifier, verifier)
+	sum := sha1.Sum(verifier)
+	encHash := make([]byte, sha1.Size)
+	c.XORKeyStream(encHash, sum[:])
+	csp := append(utf16LE("Microsoft Enhanced Cryptographic Provider v1.0"), 0, 0)
+	header := make([]byte, 32+len(csp))
+	binary.LittleEndian.PutUint32(header[0:], 0x4)
+	binary.LittleEndian.PutUint32(header[8:], 0x6801)
+	binary.LittleEndian.PutUint32(header[12:], 0x8004)
+	binary.LittleEndian.PutUint32(header[16:], keyBits)
+	binary.LittleEndian.PutUint32(header[20:], 1)
+	copy(header[32:], csp)
+	ver := make([]byte, 4+16+16+4+sha1.Size)
+	binary.LittleEndian.PutUint32(ver[0:], 16)
+	copy(ver[4:], salt)
+	copy(ver[20:], encVerifier)
+	binary.LittleEndian.PutUint32(ver[36:], sha1.Size)
+	copy(ver[40:], encHash)
+	info := make([]byte, 4+4+4+len(header)+len(ver))
+	binary.LittleEndian.PutUint16(info[0:], 4)
+	binary.LittleEndian.PutUint16(info[2:], 2)
+	binary.LittleEndian.PutUint32(info[4:], 0x4)
+	binary.LittleEndian.PutUint32(info[8:], uint32(len(header)))
+	copy(info[12:], header)
+	copy(info[12+len(header):], ver)
+	body := rc4EncryptChunks(plain, func(block int) []byte {
+		return cryptoAPIBlockKey(password, salt, keyBits, block)
+	})
+	return writeCFBPackage(info, body)
+}
+
+func rc4EncryptChunks(plain []byte, keyFn func(block int) []byte) []byte {
+	body := make([]byte, len(plain))
+	for block, off := 0, 0; off < len(plain); block++ {
+		n := 512
+		if n > len(plain)-off {
+			n = len(plain) - off
+		}
+		c, err := rc4.NewCipher(keyFn(block))
+		if err != nil {
+			return nil
+		}
+		c.XORKeyStream(body[off:off+n], plain[off:off+n])
+		off += n
+	}
+	out := make([]byte, 8+len(body))
+	binary.LittleEndian.PutUint64(out[:8], uint64(len(plain)))
+	copy(out[8:], body)
+	return out
 }
 
 func decryptStandard(rest, pkg []byte, password string) ([]byte, error) {

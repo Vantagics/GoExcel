@@ -47,6 +47,11 @@ func shiftFormula(formula string, dCol, dRow int) string {
 				i += n
 				continue
 			}
+			if span, n, ok := parseSpanRef(formula, i); ok {
+				b.WriteString(shiftSpan(span, dCol, dRow))
+				i += n
+				continue
+			}
 			b.WriteByte(formula[i])
 			i++
 		}
@@ -158,6 +163,144 @@ func shiftRef(ref formulaRef, dCol, dRow int) string {
 	}
 	b.WriteString(itoa(row))
 	return b.String()
+}
+
+// spanRef is a whole-column (F:G) or whole-row (6:7) reference.
+type spanRef struct {
+	cols       bool
+	startAbs   bool
+	endAbs     bool
+	start, end string
+}
+
+func parseSpanRef(s string, i int) (spanRef, int, bool) {
+	if i > 0 {
+		prev := s[i-1]
+		if isASCIILetter(prev) || isASCIIDigit(prev) || prev == '_' || prev == '.' {
+			return spanRef{}, 0, false
+		}
+	}
+	start := i
+	abs1 := false
+	if s[i] == '$' {
+		abs1 = true
+		i++
+		if i >= len(s) {
+			return spanRef{}, 0, false
+		}
+	}
+	if isASCIILetter(s[i]) {
+		col1 := i
+		for i < len(s) && isASCIILetter(s[i]) {
+			i++
+		}
+		col1End := i
+		if col1End-col1 < 1 || col1End-col1 > 3 || i >= len(s) || s[i] != ':' {
+			return spanRef{}, 0, false
+		}
+		i++
+		abs2 := false
+		if i < len(s) && s[i] == '$' {
+			abs2 = true
+			i++
+		}
+		if i >= len(s) || !isASCIILetter(s[i]) {
+			return spanRef{}, 0, false
+		}
+		col2 := i
+		for i < len(s) && isASCIILetter(s[i]) {
+			i++
+		}
+		if i-col2 < 1 || i-col2 > 3 {
+			return spanRef{}, 0, false
+		}
+		if i < len(s) && (isASCIILetter(s[i]) || isASCIIDigit(s[i]) || s[i] == '_' || s[i] == '.') {
+			return spanRef{}, 0, false
+		}
+		return spanRef{
+			cols: true, startAbs: abs1, endAbs: abs2,
+			start: strings.ToUpper(s[col1:col1End]),
+			end:   strings.ToUpper(s[col2:i]),
+		}, i - start, true
+	}
+	if !isASCIIDigit(s[i]) {
+		return spanRef{}, 0, false
+	}
+	row1 := 0
+	for i < len(s) && isASCIIDigit(s[i]) {
+		row1 = row1*10 + int(s[i]-'0')
+		i++
+	}
+	if row1 < 1 || i >= len(s) || s[i] != ':' {
+		return spanRef{}, 0, false
+	}
+	i++
+	abs2 := false
+	if i < len(s) && s[i] == '$' {
+		abs2 = true
+		i++
+	}
+	if i >= len(s) || !isASCIIDigit(s[i]) {
+		return spanRef{}, 0, false
+	}
+	row2 := 0
+	for i < len(s) && isASCIIDigit(s[i]) {
+		row2 = row2*10 + int(s[i]-'0')
+		i++
+	}
+	if row2 < 1 {
+		return spanRef{}, 0, false
+	}
+	if i < len(s) && (isASCIILetter(s[i]) || isASCIIDigit(s[i]) || s[i] == '_' || s[i] == '.') {
+		return spanRef{}, 0, false
+	}
+	return spanRef{cols: false, startAbs: abs1, endAbs: abs2, start: itoa(row1), end: itoa(row2)}, i - start, true
+}
+
+func shiftSpan(sp spanRef, dCol, dRow int) string {
+	if sp.cols {
+		return formatCol(sp.start, sp.startAbs, dCol) + ":" + formatCol(sp.end, sp.endAbs, dCol)
+	}
+	return formatRow(sp.start, sp.startAbs, dRow) + ":" + formatRow(sp.end, sp.endAbs, dRow)
+}
+
+func formatCol(name string, abs bool, dCol int) string {
+	if !abs && dCol != 0 {
+		idx, err := ColumnNameToIndex(name)
+		if err != nil {
+			return "#REF!"
+		}
+		idx += dCol
+		if idx < 0 || idx > 16383 {
+			return "#REF!"
+		}
+		next, err := ColumnIndexToName(idx)
+		if err != nil {
+			return "#REF!"
+		}
+		name = next
+	}
+	if abs {
+		return "$" + name
+	}
+	return name
+}
+
+func formatRow(num string, abs bool, dRow int) string {
+	row := 0
+	for _, ch := range num {
+		row = row*10 + int(ch-'0')
+	}
+	if !abs && dRow != 0 {
+		row += dRow
+		if row < 1 || row > 1048576 {
+			return "#REF!"
+		}
+	}
+	if abs {
+		return "$" + itoa(row)
+	}
+	return itoa(row)
 }
 
 func isASCIILetter(b byte) bool { return b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' }

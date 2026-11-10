@@ -86,6 +86,7 @@ func (w *XLSXWriter) writeUnencrypted(wb *Workbook, writer io.Writer) error {
 func (w *XLSXWriter) writePackage(zw *zip.Writer, wb *Workbook) error {
 	if wb != nil {
 		wb.applyFeatureEdits()
+		wb.layoutAuthored()
 	}
 	reg := newStyleRegistry(wb)
 	sst := collectSharedStrings(wb)
@@ -180,6 +181,9 @@ func (w *XLSXWriter) writePackage(zw *zip.Writer, wb *Workbook) error {
 			}
 			written[name] = true
 		}
+	}
+	if err := w.writeAuthoredParts(zw, wb); err != nil {
+		return err
 	}
 	return nil
 }
@@ -347,6 +351,30 @@ func planSheet(wb *Workbook, ws *Worksheet, index int) sheetPlan {
 		plan.commentsXML = commentsXML(comments)
 		plan.vmlXML = vmlDrawingXML(comments)
 	}
+	for _, p := range ws.pivots {
+		if p.author == nil || p.author.tablePart == "" {
+			continue
+		}
+		id := nextRelID(used)
+		p.author.sheetRelID = id
+		rels = append(rels, relationship{
+			ID:     id,
+			Type:   "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable",
+			Target: "../" + strings.TrimPrefix(p.author.tablePart, "xl/"),
+		})
+	}
+	for _, s := range ws.slicers {
+		if s.author == nil || s.author.slicerPart == "" {
+			continue
+		}
+		id := nextRelID(used)
+		s.author.sheetRelID = id
+		rels = append(rels, relationship{
+			ID:     id,
+			Type:   "http://schemas.microsoft.com/office/2007/relationships/slicer",
+			Target: "../" + strings.TrimPrefix(s.author.slicerPart, "xl/"),
+		})
+	}
 	if len(rels) > 0 {
 		plan.relsXML = relationshipsXML(rels)
 	}
@@ -452,6 +480,15 @@ func (w *XLSXWriter) writeContentTypes(zw *zip.Writer, wb *Workbook, plans []she
 			b.WriteString(e)
 		}
 	}
+	if wb != nil {
+		for _, part := range wb.authoredContentTypes() {
+			if seen[strings.ToLower(part.name)] {
+				continue
+			}
+			fmt.Fprintf(&b, `<Override PartName="%s" ContentType="%s"/>`, part.name, part.ct)
+			seen[strings.ToLower(part.name)] = true
+		}
+	}
 	b.WriteString(`</Types>`)
 	return writeZip(zw, "[Content_Types].xml", b.String())
 }
@@ -508,6 +545,26 @@ func (w *XLSXWriter) writeWorkbookRels(zw *zip.Writer, wb *Workbook, plans []she
 	sstID := nextRelID(used)
 	fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`, styleID)
 	fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>`, sstID)
+	if wb != nil {
+		for _, ws := range wb.worksheets {
+			for _, p := range ws.pivots {
+				if p.author == nil {
+					continue
+				}
+				id := nextRelID(used)
+				p.author.cacheRelID = id
+				fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="%s"/>`, id, strings.TrimPrefix(p.author.cachePart, "xl/"))
+			}
+			for _, s := range ws.slicers {
+				if s.author == nil {
+					continue
+				}
+				id := nextRelID(used)
+				s.author.cacheRelID = id
+				fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2007/relationships/slicerCache" Target="%s"/>`, id, strings.TrimPrefix(s.author.cachePart, "xl/"))
+			}
+		}
+	}
 	for _, rel := range kept {
 		mode := ""
 		if strings.EqualFold(rel.TargetMode, "External") {
@@ -586,7 +643,8 @@ func (w *XLSXWriter) writeWorkbookXML(zw *zip.Writer, wb *Workbook, plans []shee
 		b.WriteString(`</definedNames>`)
 	}
 	b.WriteString(`<calcPr calcId="191029" fullCalcOnLoad="1"/>`)
-	for _, name := range []string{"oleSize", "customWorkbookViews", "pivotCaches", "smartTagPr", "smartTagTypes", "webPublishing", "fileRecoveryPr", "webPublishObjects", "extLst"} {
+	writePivotCacheList(&b, wb)
+	for _, name := range []string{"oleSize", "customWorkbookViews", "smartTagPr", "smartTagTypes", "webPublishing", "fileRecoveryPr", "webPublishObjects", "extLst"} {
 		writePreservedNamed(&b, wb.preserved, name)
 	}
 	// Anything else we preserved and did not emit above.
@@ -774,6 +832,7 @@ func (w *XLSXWriter) writeOneSheet(zw *zip.Writer, wb *Workbook, ws *Worksheet, 
 	if plan.passthrough {
 		return writeZipBytes(zw, plan.partName, ws.rawPart)
 	}
+	ws.ensureAuthoredSlicerExt()
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
 	b.WriteString(`<worksheet xmlns="` + spreadsheetNS + `" xmlns:r="` + relNS + `"`)

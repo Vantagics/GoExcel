@@ -595,7 +595,7 @@ func applyPendingCell(ws *Worksheet, pc *pendingCell, sst []sstItem, styles *sty
 		}
 	}
 	hasFormula := pc.formula != "" || pc.fType == "array" || pc.fType == "shared" || pc.fType == "dataTable"
-	hasValue := pc.value != "" || pc.hasInline
+	hasValue := pc.value != "" || pc.hasInline || pc.t == "b"
 	if !hasFormula && !hasValue && st == nil {
 		return
 	}

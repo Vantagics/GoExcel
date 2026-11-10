@@ -26,6 +26,10 @@ func TestShiftFormulaSharedStyle(t *testing.T) {
 		{`LOG10(A1)+SUM(B2)`, 1, 1, `LOG10(B2)+SUM(C3)`},
 		{`"A1"+A1`, 1, 0, `"A1"+B1`},
 		{"Sheet1!A1", 1, 1, "Sheet1!B2"},
+		{"SUM(F:G)", 1, 2, "SUM(G:H)"},
+		{"SUM($F:G)", 1, 0, "SUM($F:H)"},
+		{"SUM(6:7)", 3, 1, "SUM(7:8)"},
+		{"SUM($6:$7)", 1, 4, "SUM($6:$7)"},
 		{"'My Sheet'!$A$1", 2, 3, "'My Sheet'!$A$1"},
 	}
 	for _, tc := range cases {

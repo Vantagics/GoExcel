@@ -55,6 +55,7 @@ type Slicer struct {
 	ColumnCount int
 
 	part            string
+	author          *slicerAuthor
 	origCaption     string
 	origStyle       string
 	origRowHeight   int
@@ -69,6 +70,7 @@ type SlicerCache struct {
 
 	part       string
 	origSource string
+	author     *slicerAuthor
 }
 
 // PivotDataField is a data field on a pivot table.
@@ -98,6 +100,7 @@ type PivotTable struct {
 	origCaption string
 	origLoc     string
 	origStyle   string
+	author      *pivotAuthor
 }
 
 // SparklineGroups returns a copy of the sheet's sparkline groups.

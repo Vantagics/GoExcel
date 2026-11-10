@@ -2,8 +2,10 @@ package gospreadsheet
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/sha512"
 	"fmt"
+	"os"
 	"testing"
 )
 
@@ -102,6 +104,71 @@ func TestAgileRoundTripPackage(t *testing.T) {
 	}
 	if _, err := DecryptPackage(enc, ""); err != ErrPasswordRequired {
 		t.Fatalf("empty password error = %v", err)
+	}
+}
+
+func TestRC4RoundTripPackage(t *testing.T) {
+	wb := New()
+	wb.GetActiveSheet().SetCellValue("A1", "encrypted-ok")
+	wb.GetActiveSheet().SetCellValue("B2", 7.0)
+	plain := mustZip(t, wb)
+	for _, tc := range []struct {
+		name string
+		enc  func([]byte, string) ([]byte, error)
+	}{
+		{"binary", encryptBinaryRC4Package},
+		{"cryptoapi", encryptCryptoAPIPackage},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blob, err := tc.enc(plain, "s3cret")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := DecryptPackage(blob, "s3cret")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, plain) {
+				t.Fatalf("plaintext mismatch %d vs %d", len(got), len(plain))
+			}
+			if _, err := DecryptPackage(blob, "nope"); err != ErrWrongPassword {
+				t.Fatalf("wrong password: %v", err)
+			}
+			name := "/tmp/go-" + tc.name + ".xlsx"
+			if err := os.WriteFile(name, blob, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPOIBinaryRC4Fixture(t *testing.T) {
+	b, err := os.ReadFile("testdata/encrypted/poi-binaryrc4.xlsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := DecryptPackage(b, "s3cret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// POI's own BinaryRC4 encryptor does not finish the ZIP central directory,
+	// but its decryptor yields this exact plaintext. Matching it locks the
+	// RC4 key schedule and 512-byte rekey to POI.
+	sum := sha256.Sum256(plain)
+	const want = "21d0935ceb0754a457327e121022722c3a485e32f8d82f49b6c9df1329adb07d"
+	if hexEncode(sum[:]) != want || len(plain) != 3422 || !bytes.HasPrefix(plain, []byte("PK\x03\x04")) {
+		t.Fatalf("poi binary rc4 plaintext len=%d hash=%s", len(plain), hexEncode(sum[:]))
+	}
+	for _, name := range []string{"go-binaryrc4.xlsx", "go-cryptoapi.xlsx"} {
+		wb, err := OpenFile("testdata/encrypted/"+name, WithPassword("s3cret"))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		v, _ := wb.GetActiveSheet().GetCellValue("A1")
+		if v != "encrypted-ok" {
+			t.Errorf("%s A1 = %#v", name, v)
+		}
 	}
 }
 

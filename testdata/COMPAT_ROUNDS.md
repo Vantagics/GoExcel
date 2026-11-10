@@ -210,7 +210,7 @@ These are no longer pass-through only.
 
 - `Worksheet.SparklineGroups` / `SetSparklineGroups` read and rewrite `x14:sparklineGroup` (type, markers, colors, formula, sqref). `testdata/excel/r3/lo-Sparklines.xlsx` round-trips; an edit of the sqref to `Z9` and a group type to `stacked` is what openpyxl, POI, and LibreOffice Calc reopen. Untouched saves keep the original sparkline XML.
 - `Worksheet.PivotTables` exposes name, cache id, data caption, location ref, style, row/col/page fields, data fields, and cache field names. Editing name, data caption, and location on `ExcelPivotTableSample.xlsx` is visible to openpyxl (`_pivots` name `RenamedPivot`) and POI (`XSSFPivotTable` name `RenamedPivot`). LibreOffice Calc reopens the file and keeps the name.
-- `Worksheet.Slicers` and `Workbook.SlicerCaches` expose name, caption, style, column count, row height, and cache source name. Edits are written back into the slicer parts. openpyxl, POI, and LibreOffice open the rewritten package and still read the sheet cells. Creating a pivot cache or slicer cache from scratch is not implemented; existing parts are edited.
+- `Worksheet.Slicers` and `Workbook.SlicerCaches` expose name, caption, style, column count, row height, and cache source name. Edits are written back into the slicer parts. openpyxl, POI, and LibreOffice open the rewritten package and still read the sheet cells.
 
 ### Array formulas
 
@@ -220,16 +220,57 @@ These are no longer pass-through only.
 
 `Workbook.SetStrictOOXML(true)` writes strict spreadsheet namespaces (`http://purl.oclc.org/ooxml/spreadsheetml/main`), strict office-document relationship types, strict extended properties, and `conformance="strict"`. Package content-types and package relationship namespaces stay on the transitional OPC URIs, matching Excel's own strict files such as `SampleSS.strict.xlsx`. The default save stays transitional, including when the file that was read was strict (`LoadedStrict` reports that without changing the writer). goexcel reads the strict package back. LibreOffice Calc opens it. openpyxl and POI still refuse strict packages (POI bug 57699); that is their limitation.
 
+## Round 11 — RC4 encryption, new pivots and slicers, Calamine and XlsxWriter
+
+### Encryption
+
+Legacy binary RC4 (EncryptionInfo 1.1, MD5, rekey every 512 bytes) and RC4 CryptoAPI (version 4.2, SHA-1, 40-bit or 128-bit) are read. `testdata/encrypted/` (password `s3cret`):
+
+| File | What it checks |
+|------|----------------|
+| `poi-binaryrc4.xlsx` | Apache POI 5.4.0 binary RC4. goexcel's plaintext matches POI's decryptor byte for byte (SHA-256 `21d0935c…`). POI's encryptor does not finish the ZIP central directory, so the plaintext is not a readable xlsx; the key schedule still matches. |
+| `go-binaryrc4.xlsx` | goexcel binary RC4 of a real xlsx. POI `BinaryRC4Decryptor` reads `A1=encrypted-ok`. |
+| `go-cryptoapi.xlsx` | goexcel RC4 CryptoAPI (40-bit). POI `CryptoAPIDecryptor.verifyPassword` succeeds and `getDataStream` reads `A1=encrypted-ok`. POI's CryptoAPI *encryptor* throws `IOException: not supported` for an OOXML package, so there is no POI-produced CryptoAPI xlsx. |
+
+msoffcrypto-tool 6.1.0 rejects version 1.1 and treats version 4.2 without the AES flag as standard AES, so it does not decrypt these two modes.
+
+Extensible encryption (minor version 3, or the `fExternal` flag) is not implemented. MS-OFFCRYPTO says that flag means every other field is zero and the cipher comes from an external provider. POI throws `Unknown encryption` and msoffcrypto has an empty extensible class. There is no portable password-based profile to implement or a fixture either tool can produce.
+
+### New pivot tables and slicers
+
+`Worksheet.AddPivotTable(name, source, dest, rowField, dataField)` snapshots a range, writes a pivot cache (shared strings, numeric min/max, cache records) and a pivot table in the shape Excel 2016 writes (`createdVersion="8"`, location, row items, `Sum of …` data field, `PivotStyleLight16`, the x14 and pivotdefaultlayout extensions). The sheet also receives the summarized values. `Worksheet.AddSlicer(pivotName, field, caption)` writes a slicer cache (`tabular` items plus the pivot table link) and a slicer part, and the worksheet `slicerList` extension.
+
+Verified on a North/South amount table:
+
+- openpyxl reads pivot name `SalesPivot`, `E4=North`, `F4=17`, grand total `22`.
+- POI `getPivotTables()` returns `SalesPivot`.
+- LibreOffice Calc converts the package and keeps the pivot cache (`Region`, `Amount`, `North`) and the pivot name.
+
+### Samples
+
+`testdata/excel/r11/` adds workbooks from two new sources:
+
+- XlsxWriter (BSD) output written for this round: tables, comments, hyperlinks, freeze panes, conditional formats, data validation, a sparkline, a hidden sheet, unicode sheet names, and repeated formulas (`xw-sales.xlsx`, `xw-format.xlsx`, `xw-unicode.xlsx`).
+- Calamine  (MIT) `tests/`: shared formulas, booleans, borders, a chart sheet, 1904 dates, ISO dates, quoted formats, backslash part names, case-insensitive part names, and whole-row/column references. Current EPPlus is Polyform Noncommercial, so those files are not vendored.
+
+### Defects fixed from this corpus
+
+- Shared formulas now shift whole-column (`F:G`) and whole-row (`6:7`) references. `cal-column_row_ranges.xlsx` matches openpyxl and POI after POI's `$A5:$XFD6` expansion is normalized back to `5:6`.
+- A boolean cell with an empty `<v>` is stored as false, so the cell is not dropped.
+- Words `true` and `TRUE` stay boolean true. POI only treats the token `1` as true; that disagreement is a POI gap. Calamine's own test expects `true`/`TRUE` to be true.
+- A 1904-system serial that POI prints as a datetime compares equal to the serial (epoch 1904-01-01). Elapsed formats stay numeric in the model.
+
+`make diffcheck` on r11 and on the full corpus (215 workbooks, including r11): **0 content defects**.
+
 ## Remaining known gaps
 
-These are reference-tool behavior or features that are not OOXML grid content. They are not goexcel content defects.
-
 - openpyxl and POI do not read strict OOXML (POI bug 57699). goexcel reads it and can write it when asked. LibreOffice Calc opens a strict file written by goexcel.
-- LibreOffice recalculates pivots, localizes captions, and reports `Err:502` for some Excel errors. Conversion succeeds; those drifts are not goexcel defects. LibreOffice 24.2 also aborts (`ScRangeList`) while importing `r1/cx-SampleSparklines.xlsx`. openpyxl and POI read that file with no content diff. The crash is the LibreOffice importer, including on the original package.
+- LibreOffice recalculates pivots, localizes captions, and reports `Err:502` or `Err:522` for some Excel formulas. Conversion succeeds; those drifts are not goexcel defects. LibreOffice 24.2 also aborts (`ScRangeList`) while importing `r1/cx-SampleSparklines.xlsx`. openpyxl and POI read that file with no content diff.
 - POI drops a shared-string index that contains trailing whitespace (`<v>2 </v>`). goexcel and openpyxl read the string.
-- openpyxl warns that it does not support sparkline extensions and would drop them if it saved the file. goexcel preserves and edits them.
-- msoffcrypto-tool 6.1.0's own encrypt of a package smaller than the 4096-byte mini-stream cutoff produces a compound file it cannot decrypt. goexcel pads the encrypted package onto the regular FAT so both msoffcrypto and POI decrypt it. The checked-in msoffcrypto fixture is a larger workbook that tool can round-trip.
-- Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells; that is the OOXML model.
-- Extensible encryption (`EncryptionInfo` minor version 3) and legacy RC4 encryption are not implemented. Agile and Standard AES are.
-- New pivot tables and slicer caches cannot be built from an empty workbook. Existing ones can be read, edited for the properties above, and written back.
+- POI treats only the boolean token `1` as true. `true` and `TRUE` are booleans in the file and in goexcel.
+- openpyxl warns that it does not support sparkline or slicer-list extensions and would drop them if it saved the file. goexcel preserves and writes them. LibreOffice's converter keeps a new pivot cache and drops the slicer parts on export.
+- msoffcrypto-tool 6.1.0 does not decrypt binary RC4 or RC4 CryptoAPI. It also cannot decrypt its own encrypt of a package under the 4096-byte mini-stream cutoff. goexcel pads Agile packages so both msoffcrypto and POI decrypt them.
+- Extensible encryption is an external cipher provider. It is not implemented.
+- Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells.
+- `AddPivotTable` builds one row field and one summed data field from a worksheet range. Column fields, filters, and grouping are not generated. `AddSlicer` attaches a slicer to a pivot created that way.
 

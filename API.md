@@ -497,6 +497,8 @@ type CellReference struct {
 | `(*Worksheet) FormulaAt(ref string) (formula, arrayRef string, err error)` | 返回 Excel 公式栏会显示的公式；若属于数组公式，同时返回 ref |
 | `(*Cell) ArrayRef / IsArrayFormula / ReportedFormula` | 数组区域与公式文本，包括只落在 ref 内的单元格 |
 | `(*Worksheet) SparklineGroups / SetSparklineGroups` | 读取或替换迷你图（类型、标记、颜色、公式、单元格） |
+| `(*Worksheet) AddPivotTable(name, source, dest, rowField, dataField string)` | 从区域建立透视缓存，并在 `dest` 写入透视表 |
+| `(*Worksheet) AddSlicer(pivotName, field, caption string)` | 为该表上的透视表字段新建切片器及缓存 |
 | `(*Worksheet) PivotTables` | 透视表名称、位置、数据标题、样式和字段。`SetName`、`SetLocation`、`SetDataCaption`、`SetStyle` 写回这些属性 |
 | `(*Worksheet) Slicers` / `(*Workbook) SlicerCaches` | 标题、样式、列数、行高，以及缓存的源字段名 |
 
