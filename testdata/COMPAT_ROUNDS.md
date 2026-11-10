@@ -520,7 +520,7 @@ Formulas may contain newlines; `B1\n+B2` evaluates. A repeated percent sign (`10
 | Full corpus formula cells the engine evaluates | 8447/9280 (91.0%) | 8507/9280 (91.7%) |
 | Full corpus cached values among those | 7695/8423 (91.4%) | 7862/8483 (92.7%) |
 
-The generated engine fixture stays 69/69, and LibreOffice Calc 24.2 stays 66/69 on it. `go test ./...` passes.
+The generated engine fixture stays 69/69, and LibreOffice Calc 24.2 stays 66/69 on it. `go test ./...` passes. `python3 scripts/diffharness.py --roundtrip` on the full corpus (267 workbooks, including r18): **0 content defects**.
 
 ## Remaining known gaps
 
