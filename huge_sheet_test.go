@@ -15,12 +15,14 @@ func TestHugeSheet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ws := wb.GetActiveSheet()
+	n := ws.CellCount()
 	d := time.Since(start)
+	runtime.GC()
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
-	ws := wb.GetActiveSheet()
 	heap := after.Alloc - before.Alloc
-	t.Logf("open %s sheets=%d cells=%d heap=%dMB", d, wb.SheetCount(), ws.CellCount(), heap/1024/1024)
+	t.Logf("open+load %s sheets=%d cells=%d retained=%dMB", d, wb.SheetCount(), n, heap/1024/1024)
 	if d > 30*time.Second {
 		t.Fatalf("open too slow: %s", d)
 	}

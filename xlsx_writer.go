@@ -1107,7 +1107,16 @@ func normalizeCols(ws *Worksheet) []colSpan {
 }
 
 func cellsToWrite(ws *Worksheet) []*Cell {
-	cells := make([]*Cell, 0)
+	ws.ensureLoaded()
+	cells := make([]*Cell, 0, len(ws.cells)+len(ws.nums)+len(ws.texts))
+	for k, v := range ws.nums {
+		r, c := splitNumKey(k)
+		cells = append(cells, &Cell{Value: v, Type: CellTypeNumeric, row: r, col: c, sheet: ws})
+	}
+	for k, s := range ws.texts {
+		r, c := splitNumKey(k)
+		cells = append(cells, &Cell{Value: s, Type: CellTypeString, row: r, col: c, sheet: ws})
+	}
 	for _, c := range ws.cells {
 		if c.Type != CellTypeEmpty || c.Value != nil || c.Formula != "" || c.Style != nil || c.Hyperlink != nil || c.Comment != nil || c.cellMeta != "" || c.valueMeta != "" || (c.RichText != nil && len(c.RichText.Runs) > 0) {
 			cells = append(cells, c)

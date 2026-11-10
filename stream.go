@@ -10,16 +10,22 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // StreamCell is one cell in a streaming read or write.
 // Column is 0-based. On write, Value may be a string, bool, float64, int,
-// or nil. A Formula without a leading "=" is stored as the formula body.
+// time.Time, or nil. A Formula without a leading "=" is stored as the formula
+// body. Style is optional. Link is an external URL. Formatted is set by
+// OpenRows when WithFormattedValues is used.
 type StreamCell struct {
-	Column  int
-	Value   interface{}
-	Formula string
-	Type    CellType
+	Column    int
+	Value     interface{}
+	Formula   string
+	Type      CellType
+	Style     *Style
+	Link      string
+	Formatted string
 }
 
 // StreamRow is one worksheet row. Number is 1-based.
@@ -32,19 +38,33 @@ type StreamRow struct {
 // RowIterator yields worksheet rows without building the cell map.
 // Shared strings are loaded once; each row is discarded after it is returned.
 type RowIterator struct {
-	file  *os.File
-	sheet io.ReadCloser
-	dec   *xml.Decoder
-	sst   []string
-	row   StreamRow
-	err   error
-	done  bool
-	next  int
+	file      *os.File
+	sheet     io.ReadCloser
+	dec       *xml.Decoder
+	sst       []string
+	row       StreamRow
+	err       error
+	done      bool
+	next      int
+	formatted bool
+	date1904  bool
+	xfs       []parsedXF
+}
+
+// WithFormattedValues makes OpenRows apply number and date formats, including
+// the 1904 date system. The formatted text is stored on StreamCell.Formatted
+// and date cells are returned as time.Time.
+func WithFormattedValues() func(*rowConfig) {
+	return func(c *rowConfig) { c.formatted = true }
+}
+
+type rowConfig struct {
+	formatted bool
 }
 
 // OpenRows opens a worksheet for streaming. sheet is the sheet name, or empty
 // for the first sheet. Close releases the file.
-func OpenRows(filename, sheet string) (*RowIterator, error) {
+func OpenRows(filename, sheet string, opts ...func(*rowConfig)) (*RowIterator, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("opening file: %w", err)
@@ -59,7 +79,13 @@ func OpenRows(filename, sheet string) (*RowIterator, error) {
 		f.Close()
 		return nil, fmt.Errorf("opening zip: %w", err)
 	}
-	it, err := newRowIterator(zr, sheet)
+	cfg := rowConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	it, err := newRowIterator(zr, sheet, cfg)
 	if err != nil {
 		f.Close()
 		return nil, err
@@ -68,7 +94,7 @@ func OpenRows(filename, sheet string) (*RowIterator, error) {
 	return it, nil
 }
 
-func newRowIterator(zr *zip.Reader, sheet string) (*RowIterator, error) {
+func newRowIterator(zr *zip.Reader, sheet string, cfg rowConfig) (*RowIterator, error) {
 	wb, err := readZipFile(zr, "xl/workbook.xml")
 	if err != nil {
 		return nil, err
@@ -98,7 +124,14 @@ func newRowIterator(zr *zip.Reader, sheet string) (*RowIterator, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &RowIterator{sheet: rc, dec: xml.NewDecoder(rc), sst: sst, next: 1}, nil
+	it := &RowIterator{sheet: rc, dec: xml.NewDecoder(rc), sst: sst, next: 1, formatted: cfg.formatted}
+	if cfg.formatted {
+		it.date1904 = workbookDate1904(wb)
+		if raw, err := readZipFile(zr, "xl/styles.xml"); err == nil {
+			it.xfs = parseStyleSheet(raw, nil).xfs
+		}
+	}
+	return it, nil
 }
 
 // Next advances to the next row. False means the sheet is finished or an error
@@ -206,6 +239,12 @@ func (it *RowIterator) readCell(start xml.StartElement) (StreamCell, error) {
 		}
 	}
 	kind := attrLocal(start, "t")
+	styleIdx := -1
+	if s := attrLocal(start, "s"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil {
+			styleIdx = n
+		}
+	}
 	var value, formula string
 	for {
 		tok, err := it.dec.Token()
@@ -273,10 +312,54 @@ func (it *RowIterator) readCell(start xml.StartElement) (StreamCell, error) {
 				if formula != "" {
 					cell.Type = CellTypeFormula
 				}
+				it.applyFormat(&cell, styleIdx)
 				return cell, nil
 			}
 		}
 	}
+}
+
+func (it *RowIterator) applyFormat(cell *StreamCell, styleIdx int) {
+	if it == nil || !it.formatted || cell == nil {
+		return
+	}
+	code := "General"
+	date := false
+	if styleIdx >= 0 && styleIdx < len(it.xfs) {
+		if it.xfs[styleIdx].formatCode != "" {
+			code = it.xfs[styleIdx].formatCode
+		}
+		date = it.xfs[styleIdx].date
+	}
+	switch v := cell.Value.(type) {
+	case float64:
+		if date {
+			serial := v
+			if it.date1904 {
+				serial += 1462
+			}
+			t := serialToDate(serial)
+			cell.Value = t
+			cell.Type = CellTypeDate
+			cell.Formatted = formatDateByCode(t, code)
+			return
+		}
+		cell.Formatted = formatNumberByCode(v, code)
+	case time.Time:
+		cell.Formatted = formatDateByCode(v, code)
+	case string:
+		cell.Formatted = v
+	case bool:
+		if v {
+			cell.Formatted = "TRUE"
+		} else {
+			cell.Formatted = "FALSE"
+		}
+	}
+}
+
+func workbookDate1904(workbook []byte) bool {
+	return strings.Contains(string(workbook), `date1904="1"`) || strings.Contains(string(workbook), `date1904="true"`)
 }
 
 func zipEntry(zr *zip.Reader, name string) (*zip.File, bool) {
@@ -325,14 +408,30 @@ func sheetPart(workbook []byte, rels []relationship, want string) (string, error
 }
 
 // StreamWriter writes an xlsx workbook row by row. Memory stays proportional
-// to one row plus the zip compressor, not to the sheet size. Cell text is
-// stored inline so a shared-string table is not accumulated.
+// to one row, the unique styles, and (when enabled) the unique shared strings.
 type StreamWriter struct {
-	zw     *zip.Writer
-	dst    io.WriteCloser
-	sheets []string
-	open   *StreamSheet
-	closed bool
+	zw        *zip.Writer
+	dst       io.WriteCloser
+	sheets    []string
+	open      *StreamSheet
+	closed    bool
+	styles    *styleRegistry
+	shared    bool
+	sst       map[string]int
+	sstList   []string
+	formulas  bool
+	dateStyle int
+}
+
+// UseSharedStrings stores cell text in a shared-string table instead of inline.
+// Memory grows with the number of distinct strings.
+func (w *StreamWriter) UseSharedStrings() {
+	if w != nil {
+		w.shared = true
+		if w.sst == nil {
+			w.sst = map[string]int{}
+		}
+	}
 }
 
 // NewStreamWriter writes an xlsx package to w.
@@ -352,12 +451,82 @@ func CreateStream(filename string) (*StreamWriter, error) {
 	return w, nil
 }
 
+func (w *StreamWriter) initStyles() {
+	if w.styles == nil {
+		w.styles = newStyleRegistry(nil)
+		w.dateStyle = -1
+	}
+}
+
 // StreamSheet is one worksheet being written.
 type StreamSheet struct {
-	parent  *StreamWriter
-	bw      *bufio.Writer
-	lastRow int
-	closed  bool
+	parent     *StreamWriter
+	bw         *bufio.Writer
+	lastRow    int
+	closed     bool
+	header     bool
+	freezeRows int
+	freezeCols int
+	cols       []streamCol
+	merges     []string
+	links      []streamLink
+}
+
+type streamCol struct {
+	min, max int
+	width    float64
+}
+
+type streamLink struct {
+	ref, url, id string
+}
+
+// SetColWidth sets the width of one 0-based column. Call it before the first row.
+func (s *StreamSheet) SetColWidth(col int, width float64) error {
+	return s.SetColWidths(col, col, width)
+}
+
+// SetColWidths sets the width of an inclusive 0-based column span.
+func (s *StreamSheet) SetColWidths(minCol, maxCol int, width float64) error {
+	if s == nil || s.closed {
+		return fmt.Errorf("sheet is closed")
+	}
+	if s.header {
+		return fmt.Errorf("column widths must be set before the first row")
+	}
+	if minCol > maxCol {
+		minCol, maxCol = maxCol, minCol
+	}
+	s.cols = append(s.cols, streamCol{min: minCol, max: maxCol, width: width})
+	return nil
+}
+
+// MergeCells records a merge such as "A1:B2". It is written when the sheet closes.
+func (s *StreamSheet) MergeCells(ref string) error {
+	if s == nil || s.closed {
+		return fmt.Errorf("sheet is closed")
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return fmt.Errorf("merge reference is required")
+	}
+	s.merges = append(s.merges, ref)
+	return nil
+}
+
+// Freeze freezes the top rows and left columns. Call it before the first row.
+func (s *StreamSheet) Freeze(rows, cols int) error {
+	if s == nil || s.closed {
+		return fmt.Errorf("sheet is closed")
+	}
+	if s.header {
+		return fmt.Errorf("freeze panes must be set before the first row")
+	}
+	if rows < 0 || cols < 0 {
+		return fmt.Errorf("freeze counts must be non-negative")
+	}
+	s.freezeRows, s.freezeCols = rows, cols
+	return nil
 }
 
 // AddSheet starts a worksheet. The previous sheet is closed first.
@@ -384,9 +553,10 @@ func (w *StreamWriter) AddSheet(name string) (*StreamSheet, error) {
 	if _, err := bw.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n"); err != nil {
 		return nil, err
 	}
-	if _, err := bw.WriteString(`<worksheet xmlns="` + spreadsheetNS + `"><sheetData>`); err != nil {
+	if _, err := bw.WriteString(`<worksheet xmlns="` + spreadsheetNS + `" xmlns:r="` + relNS + `">`); err != nil {
 		return nil, err
 	}
+	w.initStyles()
 	s := &StreamSheet{parent: w, bw: bw}
 	w.open = s
 	w.sheets = append(w.sheets, name)
@@ -405,18 +575,27 @@ func (s *StreamSheet) WriteRow(row int, cells []StreamCell) error {
 		return fmt.Errorf("row %d is before row %d", row, s.lastRow)
 	}
 	s.lastRow = row
+	if err := s.ensureHeader(); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintf(s.bw, `<row r="%d">`, row); err != nil {
 		return err
 	}
 	for _, c := range cells {
-		if c.Value == nil && c.Formula == "" {
+		if c.Value == nil && c.Formula == "" && c.Style == nil && c.Link == "" {
 			continue
 		}
 		ref, err := CellName(row-1, c.Column)
 		if err != nil {
 			return err
 		}
-		if err := writeStreamCell(s.bw, ref, c); err != nil {
+		if c.Link != "" {
+			s.links = append(s.links, streamLink{ref: ref, url: c.Link, id: fmt.Sprintf("rId%d", len(s.links)+1)})
+		}
+		if c.Formula != "" {
+			s.parent.formulas = true
+		}
+		if err := writeStreamCell(s.bw, ref, c, s.parent); err != nil {
 			return err
 		}
 	}
@@ -433,10 +612,88 @@ func (s *StreamSheet) Close() error {
 	if s.parent != nil && s.parent.open == s {
 		s.parent.open = nil
 	}
-	if _, err := s.bw.WriteString(`</sheetData></worksheet>`); err != nil {
+	if err := s.ensureHeader(); err != nil {
 		return err
 	}
-	return s.bw.Flush()
+	if _, err := s.bw.WriteString(`</sheetData>`); err != nil {
+		return err
+	}
+	if len(s.merges) > 0 {
+		fmt.Fprintf(s.bw, `<mergeCells count="%d">`, len(s.merges))
+		for _, ref := range s.merges {
+			fmt.Fprintf(s.bw, `<mergeCell ref="%s"/>`, xmlText(ref))
+		}
+		s.bw.WriteString(`</mergeCells>`)
+	}
+	if len(s.links) > 0 {
+		fmt.Fprintf(s.bw, `<hyperlinks>`)
+		for _, lk := range s.links {
+			fmt.Fprintf(s.bw, `<hyperlink ref="%s" r:id="%s"/>`, xmlText(lk.ref), xmlText(lk.id))
+		}
+		s.bw.WriteString(`</hyperlinks>`)
+	}
+	if _, err := s.bw.WriteString(`</worksheet>`); err != nil {
+		return err
+	}
+	if err := s.bw.Flush(); err != nil {
+		return err
+	}
+	if len(s.links) == 0 || s.parent == nil {
+		return nil
+	}
+	part := fmt.Sprintf("xl/worksheets/_rels/sheet%d.xml.rels", len(s.parent.sheets))
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
+	b.WriteString(`<Relationships xmlns="` + pkgRelNS + `">`)
+	for _, lk := range s.links {
+		fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="%s" TargetMode="External"/>`, xmlText(lk.id), xmlText(lk.url))
+	}
+	b.WriteString(`</Relationships>`)
+	return writeZip(s.parent.zw, part, b.String())
+}
+
+func (s *StreamSheet) ensureHeader() error {
+	if s.header {
+		return nil
+	}
+	s.header = true
+	var b strings.Builder
+	b.WriteString(`<sheetViews><sheetView workbookViewId="0"`)
+	if s.freezeRows == 0 && s.freezeCols == 0 {
+		b.WriteString(`/></sheetViews>`)
+	} else {
+		b.WriteString(`>`)
+		pane := "bottomRight"
+		switch {
+		case s.freezeCols > 0 && s.freezeRows > 0:
+			pane = "bottomRight"
+		case s.freezeCols > 0:
+			pane = "topRight"
+		default:
+			pane = "bottomLeft"
+		}
+		b.WriteString(`<pane`)
+		if s.freezeCols > 0 {
+			fmt.Fprintf(&b, ` xSplit="%d"`, s.freezeCols)
+		}
+		if s.freezeRows > 0 {
+			fmt.Fprintf(&b, ` ySplit="%d"`, s.freezeRows)
+		}
+		top, _ := CellName(s.freezeRows, s.freezeCols)
+		fmt.Fprintf(&b, ` topLeftCell="%s" activePane="%s" state="frozen"/>`, top, pane)
+		fmt.Fprintf(&b, `<selection pane="%s" activeCell="%s" sqref="%s"/>`, pane, top, top)
+		b.WriteString(`</sheetView></sheetViews>`)
+	}
+	if len(s.cols) > 0 {
+		fmt.Fprintf(&b, `<cols>`)
+		for _, c := range s.cols {
+			fmt.Fprintf(&b, `<col min="%d" max="%d" width="%s" customWidth="1"/>`, c.min+1, c.max+1, trimFloat(c.width))
+		}
+		b.WriteString(`</cols>`)
+	}
+	b.WriteString(`<sheetData>`)
+	_, err := s.bw.WriteString(b.String())
+	return err
 }
 
 // Close writes the workbook, styles, and package relationships.
@@ -458,7 +715,7 @@ func (w *StreamWriter) Close() error {
 		}
 	}
 	w.closed = true
-	if err := writeStreamStatic(w.zw, w.sheets); err != nil {
+	if err := writeStreamStatic(w); err != nil {
 		return err
 	}
 	if err := w.zw.Close(); err != nil {
@@ -470,9 +727,26 @@ func (w *StreamWriter) Close() error {
 	return nil
 }
 
-func writeStreamCell(w io.Writer, ref string, c StreamCell) error {
+func writeStreamCell(w io.Writer, ref string, c StreamCell, parent *StreamWriter) error {
 	if _, err := fmt.Fprintf(w, `<c r="%s"`, ref); err != nil {
 		return err
+	}
+	if c.Style != nil && parent != nil {
+		parent.initStyles()
+		if id := parent.styles.xfIndex(c.Style); id > 0 {
+			fmt.Fprintf(w, ` s="%d"`, id)
+		}
+	}
+	if _, ok := c.Value.(time.Time); ok && (c.Style == nil || c.Style.NumberFormat == nil) && parent != nil {
+		parent.initStyles()
+		if parent.dateStyle < 0 {
+			st := NewStyle()
+			st.NumberFormat = &FormatDate
+			parent.dateStyle = parent.styles.xfIndex(st)
+		}
+		if parent.dateStyle > 0 {
+			fmt.Fprintf(w, ` s="%d"`, parent.dateStyle)
+		}
 	}
 	formula := strings.TrimSpace(c.Formula)
 	if strings.HasPrefix(formula, "=") {
@@ -492,7 +766,15 @@ func writeStreamCell(w io.Writer, ref string, c StreamCell) error {
 	}
 	switch val := c.Value.(type) {
 	case string:
+		if parent != nil && parent.shared {
+			idx := parent.sharedIndex(val)
+			_, err := fmt.Fprintf(w, ` t="s"><v>%d</v></c>`, idx)
+			return err
+		}
 		_, err := fmt.Fprintf(w, ` t="inlineStr"><is><t>%s</t></is></c>`, xmlCellText(val))
+		return err
+	case time.Time:
+		_, err := io.WriteString(w, `><v>`+formatNumber(dateToSerial(val))+`</v></c>`)
 		return err
 	case bool:
 		n := 0
@@ -550,7 +832,22 @@ func writeStreamCached(w io.Writer, v interface{}) error {
 	}
 }
 
-func writeStreamStatic(zw *zip.Writer, sheets []string) error {
+func (w *StreamWriter) sharedIndex(s string) int {
+	if w.sst == nil {
+		w.sst = map[string]int{}
+	}
+	if idx, ok := w.sst[s]; ok {
+		return idx
+	}
+	idx := len(w.sstList)
+	w.sst[s] = idx
+	w.sstList = append(w.sstList, s)
+	return idx
+}
+
+func writeStreamStatic(w *StreamWriter) error {
+	zw := w.zw
+	sheets := w.sheets
 	var ct strings.Builder
 	ct.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
 	ct.WriteString(`<Types xmlns="` + ctNS + `">`)
@@ -558,6 +855,9 @@ func writeStreamStatic(zw *zip.Writer, sheets []string) error {
 	ct.WriteString(`<Default Extension="xml" ContentType="application/xml"/>`)
 	ct.WriteString(`<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`)
 	ct.WriteString(`<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>`)
+	if len(w.sstList) > 0 {
+		ct.WriteString(`<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>`)
+	}
 	for i := range sheets {
 		fmt.Fprintf(&ct, `<Override PartName="/xl/worksheets/sheet%d.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`, i+1)
 	}
@@ -578,7 +878,11 @@ func writeStreamStatic(zw *zip.Writer, sheets []string) error {
 	for i, name := range sheets {
 		fmt.Fprintf(&wb, `<sheet name="%s" sheetId="%d" r:id="rId%d"/>`, xmlText(name), i+1, i+1)
 	}
-	wb.WriteString(`</sheets></workbook>`)
+	wb.WriteString(`</sheets>`)
+	if w.formulas {
+		wb.WriteString(`<calcPr calcId="191029" fullCalcOnLoad="1"/>`)
+	}
+	wb.WriteString(`</workbook>`)
 	if err := writeZip(zw, "xl/workbook.xml", wb.String()); err != nil {
 		return err
 	}
@@ -588,18 +892,37 @@ func writeStreamStatic(zw *zip.Writer, sheets []string) error {
 	for i := range sheets {
 		fmt.Fprintf(&rels, `<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet%d.xml"/>`, i+1, i+1)
 	}
-	fmt.Fprintf(&rels, `<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`, len(sheets)+1)
+	next := len(sheets) + 1
+	fmt.Fprintf(&rels, `<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`, next)
+	next++
+	if len(w.sstList) > 0 {
+		fmt.Fprintf(&rels, `<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>`, next)
+	}
 	rels.WriteString(`</Relationships>`)
 	if err := writeZip(zw, "xl/_rels/workbook.xml.rels", rels.String()); err != nil {
 		return err
 	}
-	styles := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-		`<styleSheet xmlns="` + spreadsheetNS + `">` +
-		`<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>` +
-		`<fills count="1"><fill><patternFill patternType="none"/></fill></fills>` +
-		`<borders count="1"><border/></borders>` +
-		`<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
-		`<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>` +
-		`</styleSheet>`
-	return writeZip(zw, "xl/styles.xml", styles)
+	if w.styles == nil {
+		w.initStyles()
+	}
+	var styles strings.Builder
+	w.styles.writeStyles(&styles)
+	if err := writeZip(zw, "xl/styles.xml", styles.String()); err != nil {
+		return err
+	}
+	if len(w.sstList) == 0 {
+		return nil
+	}
+	var sst strings.Builder
+	sst.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
+	fmt.Fprintf(&sst, `<sst xmlns="%s" count="%d" uniqueCount="%d">`, spreadsheetNS, len(w.sstList), len(w.sstList))
+	for _, s := range w.sstList {
+		if needsPreserveSpace(s) {
+			fmt.Fprintf(&sst, `<si><t xml:space="preserve">%s</t></si>`, xmlCellText(s))
+		} else {
+			fmt.Fprintf(&sst, `<si><t>%s</t></si>`, xmlCellText(s))
+		}
+	}
+	sst.WriteString(`</sst>`)
+	return writeZip(zw, "xl/sharedStrings.xml", sst.String())
 }

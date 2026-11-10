@@ -163,6 +163,22 @@ func (r *XLSXReader) readPackage(reader io.ReaderAt, size int64) (*Workbook, err
 			}
 			continue
 		}
+		// Large sheets stay unloaded until a cell is touched. Small sheets are
+		// parsed now so a broken worksheet still fails Read.
+		if len(data) > 1<<20 {
+			sheet := ws
+			part := data
+			sheet.loaded = false
+			sheet.load = func() error {
+				if err := readWorksheet(sheet, part, pkg, sst, &styles, wb, theme); err != nil {
+					return err
+				}
+				indexSheetFeatures(wb, sheet)
+				indexRichImages(wb)
+				return nil
+			}
+			continue
+		}
 		if err := readWorksheet(ws, data, pkg, sst, &styles, wb, theme); err != nil {
 			return nil, fmt.Errorf("reading sheet %q: %w", ws.title, err)
 		}

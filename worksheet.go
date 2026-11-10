@@ -35,7 +35,9 @@ type SheetView struct {
 // Worksheet represents a single worksheet in a spreadsheet.
 type Worksheet struct {
 	title              string
-	cells              map[string]*Cell // key: "row,col" (0-based)
+	cells              map[string]*Cell   // key: "row,col" (0-based)
+	nums               map[uint64]float64 // plain numbers, kept out of cells to save memory
+	texts              map[uint64]string  // plain strings, shared with the string table
 	mergeCells         []MergeCell
 	colWidths          map[int]float64
 	rowHeights         map[int]float64
@@ -72,6 +74,8 @@ type Worksheet struct {
 	slicers            []*Slicer
 	pivots             []*PivotTable
 	threads            []ThreadedComment
+	loaded             bool
+	load               func() error
 }
 
 // NewWorksheet creates a new worksheet with the given title.
@@ -83,7 +87,129 @@ func NewWorksheet(title string) *Worksheet {
 		rowHeights: make(map[int]float64),
 		hiddenRows: make(map[int]bool),
 		hiddenCols: make(map[int]bool),
+		loaded:     true,
 	}
+}
+
+func (ws *Worksheet) shiftPlainRows(rowIdx, delta int, drop bool) {
+	if len(ws.nums) > 0 {
+		next := make(map[uint64]float64, len(ws.nums))
+		for k, v := range ws.nums {
+			r, c := splitNumKey(k)
+			if drop && r == rowIdx {
+				continue
+			}
+			if r >= rowIdx {
+				r += delta
+			}
+			if r < 0 {
+				continue
+			}
+			next[numKey(r, c)] = v
+		}
+		ws.nums = next
+	}
+	ws.texts = shiftPlainTextRows(ws.texts, rowIdx, delta, drop)
+}
+
+func (ws *Worksheet) shiftPlainCols(colIdx, delta int, drop bool) {
+	if len(ws.nums) == 0 {
+		ws.texts = shiftPlainTextCols(ws.texts, colIdx, delta, drop)
+		return
+	}
+	next := make(map[uint64]float64, len(ws.nums))
+	for k, v := range ws.nums {
+		r, c := splitNumKey(k)
+		if drop && c == colIdx {
+			continue
+		}
+		if c >= colIdx {
+			c += delta
+		}
+		if c < 0 {
+			continue
+		}
+		next[numKey(r, c)] = v
+	}
+	ws.nums = next
+	ws.texts = shiftPlainTextCols(ws.texts, colIdx, delta, drop)
+}
+
+func shiftPlainTextRows(src map[uint64]string, rowIdx, delta int, drop bool) map[uint64]string {
+	if len(src) == 0 {
+		return src
+	}
+	next := make(map[uint64]string, len(src))
+	for k, v := range src {
+		r, c := splitNumKey(k)
+		if drop && r == rowIdx {
+			continue
+		}
+		if r >= rowIdx {
+			r += delta
+		}
+		if r < 0 {
+			continue
+		}
+		next[numKey(r, c)] = v
+	}
+	return next
+}
+
+func shiftPlainTextCols(src map[uint64]string, colIdx, delta int, drop bool) map[uint64]string {
+	if len(src) == 0 {
+		return src
+	}
+	next := make(map[uint64]string, len(src))
+	for k, v := range src {
+		r, c := splitNumKey(k)
+		if drop && c == colIdx {
+			continue
+		}
+		if c >= colIdx {
+			c += delta
+		}
+		if c < 0 {
+			continue
+		}
+		next[numKey(r, c)] = v
+	}
+	return next
+}
+
+func numKey(row, col int) uint64 {
+	return uint64(uint32(row))<<32 | uint64(uint32(col))
+}
+
+func splitNumKey(k uint64) (int, int) {
+	return int(k >> 32), int(k & 0xffffffff)
+}
+
+func (ws *Worksheet) ensureLoaded() {
+	if ws == nil || ws.loaded {
+		return
+	}
+	ws.loaded = true
+	fn := ws.load
+	ws.load = nil
+	if fn != nil {
+		_ = fn()
+	}
+}
+
+// putPlainNumber stores an unstyled number without a full Cell.
+func (ws *Worksheet) putPlainNumber(row, col int, v float64) {
+	if ws.nums == nil {
+		ws.nums = make(map[uint64]float64)
+	}
+	ws.nums[numKey(row, col)] = v
+}
+
+func (ws *Worksheet) putPlainString(row, col int, s string) {
+	if ws.texts == nil {
+		ws.texts = make(map[uint64]string)
+	}
+	ws.texts[numKey(row, col)] = s
 }
 
 // Title returns the worksheet title.
@@ -104,9 +230,22 @@ func cellKey(row, col int) string {
 // GetCell returns the cell at the given 0-based row and column.
 // If the cell doesn't exist, it creates a new empty cell.
 func (ws *Worksheet) GetCell(row, col int) *Cell {
+	ws.ensureLoaded()
 	key := cellKey(row, col)
 	if c, ok := ws.cells[key]; ok {
 		c.sheet = ws
+		return c
+	}
+	if v, ok := ws.nums[numKey(row, col)]; ok {
+		delete(ws.nums, numKey(row, col))
+		c := &Cell{Value: v, Type: CellTypeNumeric, row: row, col: col, sheet: ws}
+		ws.cells[key] = c
+		return c
+	}
+	if s, ok := ws.texts[numKey(row, col)]; ok {
+		delete(ws.texts, numKey(row, col))
+		c := &Cell{Value: s, Type: CellTypeString, row: row, col: col, sheet: ws}
+		ws.cells[key] = c
 		return c
 	}
 	c := NewCell(row, col)
@@ -118,8 +257,18 @@ func (ws *Worksheet) GetCell(row, col int) *Cell {
 // GetCellIfExists returns the cell at the given 0-based row and column,
 // or nil if the cell doesn't exist. Does not create new cells.
 func (ws *Worksheet) GetCellIfExists(row, col int) *Cell {
+	ws.ensureLoaded()
 	key := cellKey(row, col)
-	return ws.cells[key]
+	if c, ok := ws.cells[key]; ok {
+		return c
+	}
+	if _, ok := ws.nums[numKey(row, col)]; ok {
+		return ws.GetCell(row, col)
+	}
+	if _, ok := ws.texts[numKey(row, col)]; ok {
+		return ws.GetCell(row, col)
+	}
+	return nil
 }
 
 // GetCellByName returns the cell at the given reference (e.g., "A1").
@@ -241,32 +390,43 @@ func (ws *Worksheet) GetFreezePane() *CellReference {
 // Dimensions returns the used range of the worksheet as (minRow, minCol, maxRow, maxCol), all 0-based.
 // Returns an error if the worksheet is empty.
 func (ws *Worksheet) Dimensions() (minRow, minCol, maxRow, maxCol int, err error) {
-	if len(ws.cells) == 0 {
+	ws.ensureLoaded()
+	if len(ws.cells) == 0 && len(ws.nums) == 0 && len(ws.texts) == 0 {
 		return 0, 0, 0, 0, errors.New("worksheet is empty")
 	}
 	first := true
+	consider := func(row, col int) {
+		if first {
+			minRow, minCol, maxRow, maxCol = row, col, row, col
+			first = false
+			return
+		}
+		if row < minRow {
+			minRow = row
+		}
+		if col < minCol {
+			minCol = col
+		}
+		if row > maxRow {
+			maxRow = row
+		}
+		if col > maxCol {
+			maxCol = col
+		}
+	}
+	for k := range ws.nums {
+		r, c := splitNumKey(k)
+		consider(r, c)
+	}
+	for k := range ws.texts {
+		r, c := splitNumKey(k)
+		consider(r, c)
+	}
 	for _, c := range ws.cells {
 		if c.Type == CellTypeEmpty && c.Value == nil && c.Formula == "" {
 			continue
 		}
-		if first {
-			minRow, minCol = c.row, c.col
-			maxRow, maxCol = c.row, c.col
-			first = false
-			continue
-		}
-		if c.row < minRow {
-			minRow = c.row
-		}
-		if c.col < minCol {
-			minCol = c.col
-		}
-		if c.row > maxRow {
-			maxRow = c.row
-		}
-		if c.col > maxCol {
-			maxCol = c.col
-		}
+		consider(c.row, c.col)
 	}
 	if first {
 		return 0, 0, 0, 0, errors.New("worksheet has no data cells")
@@ -296,7 +456,8 @@ func (ws *Worksheet) RowIterator() ([][](*Cell), error) {
 
 // CellCount returns the number of non-empty cells.
 func (ws *Worksheet) CellCount() int {
-	count := 0
+	ws.ensureLoaded()
+	count := len(ws.nums) + len(ws.texts)
 	for _, c := range ws.cells {
 		if c.Type != CellTypeEmpty || c.Value != nil || c.Formula != "" {
 			count++
@@ -307,7 +468,16 @@ func (ws *Worksheet) CellCount() int {
 
 // AllCells returns all non-empty cells sorted by row then column.
 func (ws *Worksheet) AllCells() []*Cell {
-	cells := make([]*Cell, 0)
+	ws.ensureLoaded()
+	cells := make([]*Cell, 0, len(ws.cells)+len(ws.nums)+len(ws.texts))
+	for k, v := range ws.nums {
+		r, c := splitNumKey(k)
+		cells = append(cells, &Cell{Value: v, Type: CellTypeNumeric, row: r, col: c, sheet: ws})
+	}
+	for k, s := range ws.texts {
+		r, c := splitNumKey(k)
+		cells = append(cells, &Cell{Value: s, Type: CellTypeString, row: r, col: c, sheet: ws})
+	}
 	for _, c := range ws.cells {
 		if c.Type != CellTypeEmpty || c.Value != nil || c.Formula != "" {
 			cells = append(cells, c)
@@ -452,6 +622,7 @@ func (ws *Worksheet) InsertRow(rowIdx int) {
 		}
 	}
 	ws.cells = newCells
+	ws.shiftPlainRows(rowIdx, 1, false)
 
 	// Shift merge cells
 	for i := range ws.mergeCells {
@@ -488,6 +659,7 @@ func (ws *Worksheet) DeleteRow(rowIdx int) {
 		newCells[cellKey(cell.row, cell.col)] = cell
 	}
 	ws.cells = newCells
+	ws.shiftPlainRows(rowIdx, -1, true)
 
 	// Shift merge cells
 	newMerges := make([]MergeCell, 0)
@@ -532,6 +704,7 @@ func (ws *Worksheet) InsertColumn(colIdx int) {
 		}
 	}
 	ws.cells = newCells
+	ws.shiftPlainCols(colIdx, 1, false)
 
 	// Shift merge cells
 	for i := range ws.mergeCells {
@@ -568,6 +741,7 @@ func (ws *Worksheet) DeleteColumn(colIdx int) {
 		newCells[cellKey(cell.row, cell.col)] = cell
 	}
 	ws.cells = newCells
+	ws.shiftPlainCols(colIdx, -1, true)
 
 	// Shift merge cells
 	newMerges := make([]MergeCell, 0)

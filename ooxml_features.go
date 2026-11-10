@@ -175,15 +175,24 @@ func indexWorkbookFeatures(wb *Workbook) {
 	if wb == nil || wb.source == nil {
 		return
 	}
-	caches := indexPivotCaches(wb)
 	for _, ws := range wb.worksheets {
-		ws.sparklineGroups = parseSparklineGroups(preservedNamed(ws.preserved, "extLst"))
-		ws.slicers = findSlicers(wb, ws)
-		ws.pivots = findPivots(wb, ws, caches)
+		if ws.loaded {
+			indexSheetFeatures(wb, ws)
+		}
 	}
 	wb.slicerCaches = findSlicerCaches(wb)
 	readPersons(wb, wb.source)
 	indexRichImages(wb)
+}
+
+func indexSheetFeatures(wb *Workbook, ws *Worksheet) {
+	if wb == nil || ws == nil || wb.source == nil {
+		return
+	}
+	caches := indexPivotCaches(wb)
+	ws.sparklineGroups = parseSparklineGroups(preservedNamed(ws.preserved, "extLst"))
+	ws.slicers = findSlicers(wb, ws)
+	ws.pivots = findPivots(wb, ws, caches)
 }
 
 func preservedNamed(nodes []rawXML, name string) string {

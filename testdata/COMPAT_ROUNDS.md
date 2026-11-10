@@ -351,6 +351,44 @@ openpyxl, POI, and LibreOffice Calc open a streamed workbook. The streamed formu
 
 `python3 scripts/diffharness.py --roundtrip` on r13: **19 files, 0 content defects**. The same check on the full corpus (263 workbooks, including r13): **0 content defects**.
 
+## Round 14 — styled streaming, lower OpenFile memory, formula cache
+
+### Streaming writer and reader
+
+`CreateStream` now writes fonts, fills, borders, and number formats (including dates), an optional shared-string table (`UseSharedStrings`), column widths, merged cells, frozen panes, formulas, and hyperlinks. Style and string tables grow with the number of distinct styles and strings, not with the number of rows. A workbook that contains a formula gets `calcPr fullCalcOnLoad="1"` so Excel recalculates on open.
+
+`OpenRows(..., WithFormattedValues())` loads the style table and the 1904 flag once, then applies number and date formats as each row is read. Date cells come back as `time.Time`.
+
+Checked on `/tmp/styled-stream.xlsx`:
+
+- openpyxl reads bold red `Title`, hyperlink `https://example.com`, number format `0.00`, date format `yyyy-mm-dd`, merge `A1:B1`, freeze `B2`, column width 18.
+- POI opens the sheet and reads `A1=Title`.
+- LibreOffice Calc keeps the merge and freeze and recalculates `SUM(B2,1)` to 4.5.
+
+`TestStreamMemory` again: streaming read of `ej-huge.xlsx` peaks at about 33MB; writing 2,000,000 cells peaks at about 3MB.
+
+### OpenFile memory
+
+Plain numbers and plain strings are stored in compact maps. Cells are applied as each row is parsed instead of being buffered for the whole sheet. Worksheets larger than 1MB of XML stay unloaded until a cell is touched; smaller sheets are still parsed during `Read`, so a broken sheet fails immediately.
+
+On `testdata/perf/ej-huge.xlsx` (1,400,014 cells):
+
+| | Before this round | After |
+| --- | --- | --- |
+| Load time | about 9s | 3.0s |
+| Peak heap while loading | about 1600MB | 415MB |
+| Retained heap after GC | about 1080MB | 198MB |
+
+`OpenRows` over the same file stays near 33MB.
+
+### Formulas
+
+The calculation engine evaluates comparisons (`=`, `<>`, `<`, `>`, `<=`, `>=`), so `IF(A1>1,"yes","no")` returns `yes` along with `SUM`, `AVERAGE`, `ROUND`, and `MAX`. Cached results are written on the formula cell. New workbooks, including streamed ones, set `fullCalcOnLoad="1"` (calcId 191029) so Excel recalculates. LibreOffice matches `SUM(1.5,2.5)=4`. Its converter stored the IF string result as numeric 0; the file we wrote caches `yes`.
+
+### Samples
+
+`testdata/excel/r14/` adds three workbooks from plandem/xlsx (MIT): formatted cells, iteration, and a simple sheet. `python3 scripts/diffharness.py --roundtrip` on the full corpus (266 workbooks, including r14): **0 content defects**. `go test ./...` passes.
+
 ## Remaining known gaps
 
 - openpyxl and POI do not read strict OOXML (POI bug 57699). goexcel reads it and can write it when asked. LibreOffice Calc opens a strict file written by goexcel.
@@ -362,8 +400,8 @@ openpyxl, POI, and LibreOffice Calc open a streamed workbook. The streamed formu
 - Extensible encryption is an external cipher provider. It is not implemented.
 - LibreOffice's refresh ignores pivot `fieldGroup`, so date and numeric groups stay as the precomputed cache labels in goexcel and become the base values after a LibreOffice recalc. Average and max can disappear in LibreOffice's compact layout.
 - `PivotFilter.Include` is an allow-list. A numeric field that is only a data field (not on an axis) has no discrete items to filter.
-- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. The streaming writer stores text inline and does not write styles or a shared-string table. `OpenRows` returns cached numbers and strings and does not apply date formats.
-- LibreOffice 24.2 reports `#NAME?` for `_xlfn.UNIQUE` and recalculates some cached formula results (the 4,000-row sheet's cached `0` becomes the computed total). Those are recalc gaps. openpyxl still refuses a workbook whose relationship points at a missing `xl/sharedStrings.xml`.
-- `OpenFile` on `testdata/perf/ej-huge.xlsx` still builds the full cell map (about 1600MB peak heap). `OpenRows` reads that file in about 29MB. The file stays outside `make diffcheck`.
+- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. `OpenRows` applies formats only when `WithFormattedValues` is set. The calculation engine covers the common functions it implements; array formulas, dynamic arrays, and the rest of the Excel function set are left for Excel via `fullCalcOnLoad`.
+- LibreOffice 24.2 reports `#NAME?` for `_xlfn.UNIQUE` and recalculates some cached formula results (the 4,000-row sheet's cached `0` becomes the computed total). Its converter stored `IF(A1>1,"yes","no")` as numeric 0. Those are recalc gaps. openpyxl still refuses a workbook whose relationship points at a missing `xl/sharedStrings.xml`.
+- `OpenFile` of `testdata/perf/ej-huge.xlsx` retains about 198MB after the sheet is loaded (peak about 415MB while parsing). `OpenRows` stays near 33MB. The file stays outside `make diffcheck`. Worksheets larger than 1MB of XML are not parsed until a cell is read.
 - Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells. `AddSlicer` still attaches a slicer to a pivot created with `AddPivotTable` or `BuildPivotTable`.
 

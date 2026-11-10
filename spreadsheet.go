@@ -333,9 +333,9 @@ func formatDateByCode(t time.Time, code string) string {
 		return t.Format("2006-01-02")
 	case "yyyy-mm-dd hh:mm:ss":
 		return t.Format("2006-01-02 15:04:05")
-	case "hh:mm:ss":
+	case "hh:mm:ss", "h:mm:ss":
 		return t.Format("15:04:05")
-	case "mm/dd/yyyy":
+	case "m/d/yyyy", "mm/dd/yyyy":
 		return t.Format("01/02/2006")
 	case "dd/mm/yyyy":
 		return t.Format("02/01/2006")

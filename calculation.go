@@ -81,6 +81,10 @@ func (ce *CalculationEngine) evaluate(ws *Worksheet, formula string) (interface{
 		return formula[1 : len(formula)-1], nil
 	}
 
+	if v, ok, err := ce.evalCompare(ws, formula); ok || err != nil {
+		return v, err
+	}
+
 	// Simple binary operations: A1+B1, A1-B1, A1*B1, A1/B1
 	for _, op := range []string{"+", "-", "*", "/"} {
 		if idx := findOperator(formula, op); idx > 0 {
@@ -97,6 +101,89 @@ func (ce *CalculationEngine) evaluate(ws *Worksheet, formula string) (interface{
 	}
 
 	return nil, fmt.Errorf("cannot evaluate: %s", formula)
+}
+
+func (ce *CalculationEngine) evalCompare(ws *Worksheet, formula string) (interface{}, bool, error) {
+	for _, op := range []string{"<>", ">=", "<=", "=", ">", "<"} {
+		idx := findCompare(formula, op)
+		if idx <= 0 {
+			continue
+		}
+		left, err := ce.evaluate(ws, formula[:idx])
+		if err != nil {
+			return nil, true, err
+		}
+		right, err := ce.evaluate(ws, formula[idx+len(op):])
+		if err != nil {
+			return nil, true, err
+		}
+		return compareValues(left, right, op), true, nil
+	}
+	return nil, false, nil
+}
+
+func findCompare(formula, op string) int {
+	depth := 0
+	inStr := false
+	for i := 0; i+len(op) <= len(formula); i++ {
+		ch := formula[i]
+		if ch == '"' {
+			inStr = !inStr
+			continue
+		}
+		if inStr {
+			continue
+		}
+		if ch == '(' {
+			depth++
+			continue
+		}
+		if ch == ')' {
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth == 0 && formula[i:i+len(op)] == op {
+			if i == 0 {
+				continue
+			}
+			return i
+		}
+	}
+	return -1
+}
+
+func compareValues(left, right interface{}, op string) bool {
+	_, lok := left.(string)
+	_, rok := right.(string)
+	var cmp int
+	if lok || rok {
+		cmp = strings.Compare(fmt.Sprint(left), fmt.Sprint(right))
+	} else {
+		lf, rf := toFloat(left), toFloat(right)
+		if lf < rf {
+			cmp = -1
+		} else if lf > rf {
+			cmp = 1
+		}
+	}
+	switch op {
+	case "=":
+		return cmp == 0
+	case "<>":
+		return cmp != 0
+	case ">":
+		return cmp > 0
+	case "<":
+		return cmp < 0
+	case ">=":
+		return cmp >= 0
+	case "<=":
+		return cmp <= 0
+	default:
+		return false
+	}
 }
 
 func findOperator(formula string, op string) int {

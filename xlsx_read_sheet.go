@@ -107,11 +107,15 @@ func readWorksheet(ws *Worksheet, data []byte, pkg *ooxmlPackage, sst []sstItem,
 				return err
 			}
 		case "sheetData":
-			cells, meta, err := parseSheetData(dec, theme)
+			meta, err := parseSheetData(dec, theme, func(cell pendingCell) {
+				if cell.fType == "array" && cell.formula != "" && !strings.HasPrefix(cell.formula, "{") {
+					cell.formula = "{" + cell.formula + "}"
+				}
+				applyPendingCell(ws, &cell, sst, styles, wb)
+			})
 			if err != nil {
 				return err
 			}
-			pending = append(pending, cells...)
 			rows = append(rows, meta...)
 		case "mergeCells":
 			if err := parseMergeCells(dec, ws); err != nil {
@@ -430,20 +434,34 @@ func parseCols(dec *xml.Decoder, ws *Worksheet, styles *styleTable) error {
 	}
 }
 
-func parseSheetData(dec *xml.Decoder, theme []string) ([]pendingCell, []rowMeta, error) {
-	var cells []pendingCell
+func parseSheetData(dec *xml.Decoder, theme []string, apply func(pendingCell)) ([]rowMeta, error) {
 	var rows []rowMeta
+	var deferred []pendingCell
+	masters := map[string]sharedMaster{}
 	nextRow := 1
+	flush := func(cell pendingCell) {
+		if cell.fType == "shared" {
+			if cell.formula != "" {
+				masters[cell.fSi] = sharedMaster{formula: cell.formula, row: cell.row, col: cell.col}
+			} else if m, ok := masters[cell.fSi]; ok {
+				cell.formula = shiftFormula(m.formula, cell.col-m.col, cell.row-m.row)
+			} else {
+				deferred = append(deferred, cell)
+				return
+			}
+		}
+		apply(cell)
+	}
 	for {
 		tok, err := dec.Token()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if t.Name.Local != "row" {
 				if err := skipElement(dec); err != nil {
-					return nil, nil, err
+					return nil, err
 				}
 				continue
 			}
@@ -463,12 +481,22 @@ func parseSheetData(dec *xml.Decoder, theme []string) ([]pendingCell, []rowMeta,
 			rows = append(rows, meta)
 			rowCells, err := parseRow(dec, rowNum-1, theme)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			cells = append(cells, rowCells...)
+			for _, cell := range rowCells {
+				flush(cell)
+			}
 		case xml.EndElement:
 			if t.Name.Local == "sheetData" {
-				return cells, rows, nil
+				for _, cell := range deferred {
+					if cell.fType == "shared" && cell.formula == "" {
+						if m, ok := masters[cell.fSi]; ok {
+							cell.formula = shiftFormula(m.formula, cell.col-m.col, cell.row-m.row)
+						}
+					}
+					apply(cell)
+				}
+				return rows, nil
 			}
 		}
 	}
@@ -600,6 +628,30 @@ func applyPendingCell(ws *Worksheet, pc *pendingCell, sst []sstItem, styles *sty
 	hasValue := pc.value != "" || pc.hasInline || pc.t == "b"
 	if !hasFormula && !hasValue && st == nil && pc.cm == "" && pc.vm == "" {
 		return
+	}
+	if !hasFormula && st == nil && pc.cm == "" && pc.vm == "" && pc.t == "" && !pc.hasInline {
+		if f, err := strconv.ParseFloat(pc.value, 64); err == nil && !isDate {
+			ws.putPlainNumber(pc.row, pc.col, f)
+			return
+		}
+	}
+	if !hasFormula && st == nil && pc.cm == "" && pc.vm == "" {
+		switch pc.t {
+		case "s":
+			idx, err := strconv.Atoi(strings.TrimSpace(pc.value))
+			if err == nil && idx >= 0 && idx < len(sst) && sst[idx].rich == nil {
+				ws.putPlainString(pc.row, pc.col, sst[idx].text)
+				return
+			}
+		case "inlineStr":
+			if pc.inlineRich == nil {
+				ws.putPlainString(pc.row, pc.col, pc.inline)
+				return
+			}
+		case "str":
+			ws.putPlainString(pc.row, pc.col, unescapeOOXMLText(pc.value))
+			return
+		}
 	}
 	cell := ws.GetCell(pc.row, pc.col)
 	defer func() {
