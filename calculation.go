@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
 // CalculationEngine evaluates cell formulas.
 type CalculationEngine struct {
 	workbook *Workbook
+	visiting map[string]bool
 }
 
 // NewCalculationEngine creates a new calculation engine for a workbook.
@@ -26,7 +28,20 @@ func (ce *CalculationEngine) CalculateCell(ws *Worksheet, ref string) (interface
 	if cell.Type != CellTypeFormula {
 		return cell.Value, nil
 	}
-	return ce.evaluate(ws, cell.Formula)
+	v, err := ce.evaluate(ws, cell.Formula)
+	if err != nil {
+		return nil, err
+	}
+	if rg, ok := v.(*formulaRange); ok {
+		if len(rg.values) == 1 {
+			return rg.values[0], nil
+		}
+		return nil, fmt.Errorf("#VALUE!")
+	}
+	if v == nil {
+		return 0.0, nil
+	}
+	return v, nil
 }
 
 // CalculateAll evaluates all formula cells in the workbook.
@@ -40,7 +55,12 @@ func (ce *CalculationEngine) CalculateAll() error {
 			if cell.Type == CellTypeFormula {
 				val, err := ce.evaluate(ws, cell.Formula)
 				if err != nil {
-					cell.Value = "#ERROR!"
+					msg := err.Error()
+					if strings.HasPrefix(msg, "#") {
+						cell.Value = msg
+					} else {
+						cell.Value = "#ERROR!"
+					}
 				} else {
 					cell.Value = val
 				}
@@ -53,54 +73,31 @@ func (ce *CalculationEngine) CalculateAll() error {
 // evaluate parses and evaluates a formula string.
 func (ce *CalculationEngine) evaluate(ws *Worksheet, formula string) (interface{}, error) {
 	formula = strings.TrimSpace(formula)
+	if strings.HasPrefix(formula, "=") {
+		formula = strings.TrimSpace(formula[1:])
+	}
+	if len(formula) >= 2 && formula[0] == '{' && formula[len(formula)-1] == '}' {
+		formula = strings.TrimSpace(formula[1 : len(formula)-1])
+	}
 	if formula == "" {
 		return nil, fmt.Errorf("empty formula")
 	}
-
-	// Check for function calls
-	upperFormula := strings.ToUpper(formula)
-	for fname, fn := range getBuiltinFunctions() {
-		if strings.HasPrefix(upperFormula, fname+"(") && strings.HasSuffix(formula, ")") {
-			args := formula[len(fname)+1 : len(formula)-1]
-			return fn(ce, ws, args)
-		}
+	if isExcelError(formula) {
+		return nil, fmt.Errorf("%s", formula)
 	}
-
-	// Check for cell reference
-	if isCellRef(formula) {
-		return ce.resolveCellValue(ws, formula)
+	p := &formulaParser{ce: ce, ws: ws, s: formula}
+	v, err := p.parseCompare()
+	if err != nil {
+		return nil, err
 	}
-
-	// Try numeric literal
-	if v, err := strconv.ParseFloat(formula, 64); err == nil {
-		return v, nil
+	p.skip()
+	if p.i < len(p.s) {
+		return nil, fmt.Errorf("cannot evaluate: %s", formula)
 	}
-
-	// Try string literal
-	if strings.HasPrefix(formula, `"`) && strings.HasSuffix(formula, `"`) {
-		return formula[1 : len(formula)-1], nil
+	if rg, ok := v.(*formulaRange); ok && len(rg.values) == 1 {
+		return rg.values[0], nil
 	}
-
-	if v, ok, err := ce.evalCompare(ws, formula); ok || err != nil {
-		return v, err
-	}
-
-	// Simple binary operations: A1+B1, A1-B1, A1*B1, A1/B1
-	for _, op := range []string{"+", "-", "*", "/"} {
-		if idx := findOperator(formula, op); idx > 0 {
-			left, err := ce.evaluate(ws, formula[:idx])
-			if err != nil {
-				return nil, err
-			}
-			right, err := ce.evaluate(ws, formula[idx+1:])
-			if err != nil {
-				return nil, err
-			}
-			return applyOp(toFloat(left), toFloat(right), op)
-		}
-	}
-
-	return nil, fmt.Errorf("cannot evaluate: %s", formula)
+	return v, nil
 }
 
 func (ce *CalculationEngine) evalCompare(ws *Worksheet, formula string) (interface{}, bool, error) {
@@ -155,12 +152,42 @@ func findCompare(formula, op string) int {
 }
 
 func compareValues(left, right interface{}, op string) bool {
-	_, lok := left.(string)
-	_, rok := right.(string)
+	if op == "=" && ((left == nil && blankLike(right)) || (right == nil && blankLike(left))) {
+		return true
+	}
+	if op == "<>" && ((left == nil && blankLike(right)) || (right == nil && blankLike(left))) {
+		return false
+	}
+	if left == nil {
+		left = 0.0
+	}
+	if right == nil {
+		right = 0.0
+	}
+	ln, lok := asNumber(left, false)
+	rn, rok := asNumber(right, false)
 	var cmp int
-	if lok || rok {
-		cmp = strings.Compare(fmt.Sprint(left), fmt.Sprint(right))
-	} else {
+	switch {
+	case lok && rok:
+		if ln < rn {
+			cmp = -1
+		} else if ln > rn {
+			cmp = 1
+		}
+	default:
+		ls, lstr := left.(string)
+		rs, rstr := right.(string)
+		if lstr && rstr {
+			cmp = strings.Compare(strings.ToLower(ls), strings.ToLower(rs))
+			break
+		}
+		// Excel does not treat a number and text as equal.
+		if op == "=" {
+			return false
+		}
+		if op == "<>" {
+			return true
+		}
 		lf, rf := toFloat(left), toFloat(right)
 		if lf < rf {
 			cmp = -1
@@ -229,6 +256,49 @@ func applyOp(left, right float64, op string) (float64, error) {
 	return 0, fmt.Errorf("unknown operator: %s", op)
 }
 
+func blankLike(v interface{}) bool {
+	if v == nil || v == false {
+		return true
+	}
+	if s, ok := v.(string); ok && s == "" {
+		return true
+	}
+	if n, ok := asNumber(v, false); ok && n == 0 {
+		return true
+	}
+	return false
+}
+
+func arithNumber(v interface{}) (float64, error) {
+	if v == nil {
+		return 0, nil
+	}
+	if n, ok := asNumber(v, false); ok {
+		return n, nil
+	}
+	if b, ok := v.(bool); ok {
+		if b {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	if s, ok := v.(string); ok {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+			return f, nil
+		}
+		return 0, fmt.Errorf("#VALUE!")
+	}
+	return 0, fmt.Errorf("#VALUE!")
+}
+
+func requireNumber(v interface{}) (float64, error) {
+	sv, err := scalarValue(v)
+	if err != nil {
+		return 0, err
+	}
+	return arithNumber(sv)
+}
+
 func toFloat(v interface{}) float64 {
 	switch val := v.(type) {
 	case float64:
@@ -240,6 +310,8 @@ func toFloat(v interface{}) float64 {
 			return 1
 		}
 		return 0
+	case time.Time:
+		return dateToSerial(val)
 	case string:
 		if f, err := strconv.ParseFloat(val, 64); err == nil {
 			return f
@@ -274,49 +346,66 @@ func isCellRef(s string) bool {
 }
 
 func (ce *CalculationEngine) resolveCellValue(ws *Worksheet, ref string) (interface{}, error) {
-	cell, err := ws.GetCellByName(ref)
+	sheet, cellRef, err := ce.resolveRef(ws, ref)
 	if err != nil {
 		return nil, err
 	}
+	key := sheet.Title() + "!" + cellRef
+	if ce.visiting == nil {
+		ce.visiting = map[string]bool{}
+	}
+	if ce.visiting[key] {
+		return nil, fmt.Errorf("#REF!")
+	}
+	ce.visiting[key] = true
+	defer delete(ce.visiting, key)
+	cell := sheet.GetCellIfExists(mustRef(cellRef).Row-1, mustRef(cellRef).ColumnIdx)
+	if cell == nil {
+		return nil, nil
+	}
 	if cell.Type == CellTypeFormula {
-		return ce.evaluate(ws, cell.Formula)
+		return ce.evaluate(sheet, cell.Formula)
+	}
+	if cell.Type == CellTypeEmpty && cell.Value == nil {
+		return nil, nil
 	}
 	return cell.Value, nil
 }
 
-// resolveRange resolves a range like "A1:A10" to a slice of values.
+func mustRef(ref string) *CellReference {
+	cr, err := ParseCellReference(stripAbs(ref))
+	if err != nil {
+		return &CellReference{}
+	}
+	return cr
+}
+
+// resolveRange resolves a range like "A1:A10" or "Sheet2!A1:B2".
+// Every cell is returned, including blanks, so criteria ranges stay aligned.
 func (ce *CalculationEngine) resolveRange(ws *Worksheet, rangeStr string) ([]interface{}, error) {
-	start, end, err := ParseRange(rangeStr)
+	rg, err := ce.evalRange(ws, rangeStr)
 	if err != nil {
 		return nil, err
 	}
-	var values []interface{}
-	for row := start.Row - 1; row <= end.Row-1; row++ {
-		for col := start.ColumnIdx; col <= end.ColumnIdx; col++ {
-			cell := ws.GetCellIfExists(row, col)
-			if cell == nil {
-				continue
-			}
-			var val interface{}
-			if cell.Type == CellTypeFormula {
-				val, _ = ce.evaluate(ws, cell.Formula)
-			} else {
-				val = cell.Value
-			}
-			if val != nil {
-				values = append(values, val)
-			}
-		}
-	}
-	return values, nil
+	return rg.values, nil
 }
 
 // parseArgs splits function arguments, respecting nested parentheses.
 func parseArgs(args string) []string {
 	var result []string
 	depth := 0
+	inStr := false
 	var current strings.Builder
 	for _, ch := range args {
+		if ch == '"' {
+			inStr = !inStr
+			current.WriteRune(ch)
+			continue
+		}
+		if inStr {
+			current.WriteRune(ch)
+			continue
+		}
 		if ch == '(' {
 			depth++
 			current.WriteRune(ch)

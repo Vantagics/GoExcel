@@ -389,6 +389,41 @@ The calculation engine evaluates comparisons (`=`, `<>`, `<`, `>`, `<=`, `>=`), 
 
 `testdata/excel/r14/` adds three workbooks from plandem/xlsx (MIT): formatted cells, iteration, and a simple sheet. `python3 scripts/diffharness.py --roundtrip` on the full corpus (266 workbooks, including r14): **0 content defects**. `go test ./...` passes.
 
+## Round 15 — formula calculation engine
+
+### Inventory before
+
+The engine evaluated a single function call or one comparison, then `+ - * /`. It had 25 names: `SUM`, `AVERAGE`, `COUNT`, `COUNTA`, `MAX`, `MIN`, `IF`, `ABS`, `ROUND`, `SQRT`, `POWER`, `MOD`, `INT`, `LEN`, `UPPER`, `LOWER`, `TRIM`, `LEFT`, `RIGHT`, `MID`, `CONCATENATE`, `MEDIAN`, `SUMIF`, `COUNTIF`, plus the four arithmetic operators. A probe of 20 formulas (arithmetic, `SUMIF`, `COUNTIF`, `&`, `AND`, `VLOOKUP`, `A1/0`, `COUNT` of a range that contains text) evaluated 16 without an error. The four misses were `&`, `AND`, `VLOOKUP`, and division by zero (the error string was a Go error, not `#DIV/0!`). `COUNT` of a range that contained text counted the text. There was no `%`, `^`, unary minus, sheet reference, defined name, or absolute-ref handling beyond what the cell parser already stripped.
+
+### After
+
+The parser is precedence-based: comparisons, `&`, `+ -`, `* /`, right-associative `^`, unary `+ -`, postfix `%`, then parentheses, strings, numbers, error literals, refs, and calls. It accepts `$` absolute refs, `'Sheet Name'!A1`, `Sheet1!A1:B2`, and workbook defined names. Unknown names and unknown functions are `#NAME?`. A circular reference is `#REF!`. Division by zero is `#DIV/0!`. A multi-cell range used as a scalar is `#VALUE!`. `CalculateAll` stores the Excel error text (`#DIV/0!`, `#N/A`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`) on the cell. New workbooks still set `fullCalcOnLoad="1"` so Excel recalculates functions this engine does not implement.
+
+Functions added or corrected this round, on top of the original 25:
+
+- Math and aggregate: `SUMIFS`, `SUMPRODUCT`, `COUNTIFS`, `AVERAGEIF`, `AVERAGEIFS`, `ROUNDUP`, `ROUNDDOWN`, `CEILING`, `FLOOR`, `SIGN`, `PRODUCT`. `MOD` uses Excel's floor form (`MOD(-3,2)` is 1). `COUNT` counts only numbers. Range aggregates skip text and blanks; a scalar argument still coerces.
+- Logical: `AND`, `OR`, `NOT`, `IFERROR`, `IFNA`, `IFS`, `SWITCH`, `XOR`.
+- Lookup: `VLOOKUP`, `HLOOKUP`, `INDEX`, `MATCH`, `XLOOKUP`, `XMATCH`, `CHOOSE`, `OFFSET`, `INDIRECT`.
+- Text: `CONCAT`, `TEXTJOIN`, `FIND`, `SEARCH`, `SUBSTITUTE`, `REPLACE`, `TEXT`, `VALUE`.
+- Date and time: `DATE`, `TODAY`, `NOW`, `YEAR`, `MONTH`, `DAY`, `EDATE`, `EOMONTH`, `DATEDIF`, `WEEKDAY`, `NETWORKDAYS`, `WORKDAY`.
+- Info: `ISBLANK`, `ISNUMBER`, `ISTEXT`, `ISERROR`, `ISNA`.
+
+`_xlfn.` and `_xlws.` prefixes are stripped before the name lookup, so a file that stored `IFS` or `XLOOKUP` for Excel still evaluates here. `DATE` follows Excel's 1900 leap-day serial (`DATE(1900,1,1)` is 1 and `DATE(1900,2,29)` is 60). Stored `time.Time` values still use the writer's 1899-12-30 epoch, which already matches Excel serials from 1900-03-01 on.
+
+### Differential
+
+`TestFormulaEngineCoverage` builds one workbook of 65 formulas (the categories above, plus `&`, `%`, `^`, unary minus, a cross-sheet ref, and a defined name) and compares the engine with itself and with LibreOffice Calc 24.2 headless.
+
+| Check | Before | After |
+| --- | --- | --- |
+| Engine on the 65-formula workbook | 16/20 on the smaller probe (the rest were unsupported) | 65/65 |
+| LibreOffice on the same workbook | not measured (those functions were not written) | 63/65 |
+| Excel cached values on corpus formulas the engine evaluates | not measured | 560/653 (85%) |
+
+The corpus sample is `FormulaEvalTestData_Copy.xlsx`, `shared_formulas.xlsx`, `r11/xw-sales.xlsx`, `r12/ej-fibonacci.xlsx`, `r13/ps-sharedformula.xlsx`, and `r13/npoi-matrix.xlsx`. Cached `<v>` values written by Excel are the ground truth. The two LibreOffice misses are LibreOffice 24.2 gaps, not engine results: it returns `#NAME?` for `_xlfn.XLOOKUP` and `#VALUE!` for `SUM` of a defined name that the engine sums to 60. `TODAY` and `NOW` are implemented and left out of the strict fixture because the clock moves.
+
+`go test ./...` passes. `python3 scripts/diffharness.py --roundtrip` on the full corpus (266 workbooks): **0 content defects**.
+
 ## Remaining known gaps
 
 - openpyxl and POI do not read strict OOXML (POI bug 57699). goexcel reads it and can write it when asked. LibreOffice Calc opens a strict file written by goexcel.
@@ -400,7 +435,7 @@ The calculation engine evaluates comparisons (`=`, `<>`, `<`, `>`, `<=`, `>=`), 
 - Extensible encryption is an external cipher provider. It is not implemented.
 - LibreOffice's refresh ignores pivot `fieldGroup`, so date and numeric groups stay as the precomputed cache labels in goexcel and become the base values after a LibreOffice recalc. Average and max can disappear in LibreOffice's compact layout.
 - `PivotFilter.Include` is an allow-list. A numeric field that is only a data field (not on an axis) has no discrete items to filter.
-- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. `OpenRows` applies formats only when `WithFormattedValues` is set. The calculation engine covers the common functions it implements; array formulas, dynamic arrays, and the rest of the Excel function set are left for Excel via `fullCalcOnLoad`.
+- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. `OpenRows` applies formats only when `WithFormattedValues` is set. The calculation engine covers the functions listed in round 15. Array formulas, dynamic arrays, structured table references, the intersection (space) and union (comma) operators, and the rest of the Excel function set stay on `fullCalcOnLoad` for Excel. `DATEDIF` accepts `Y`, `M`, and `D` only. `NETWORKDAYS` and `WORKDAY` skip Saturday and Sunday and do not take a holiday list. `CEILING` and `FLOOR` are the significance forms. LibreOffice 24.2 still returns `#NAME?` for `_xlfn.XLOOKUP` and `#VALUE!` for `SUM` of a defined name that this engine evaluates. Corpus formulas that remain off the cached-value match are mostly array-style ranges used as scalars, bool-versus-text ordering (`FALSE>"TRUE"`), and a few aggregates whose Excel result depends on array evaluation.
 - LibreOffice 24.2 reports `#NAME?` for `_xlfn.UNIQUE` and recalculates some cached formula results (the 4,000-row sheet's cached `0` becomes the computed total). Its converter stored `IF(A1>1,"yes","no")` as numeric 0. Those are recalc gaps. openpyxl still refuses a workbook whose relationship points at a missing `xl/sharedStrings.xml`.
 - `OpenFile` of `testdata/perf/ej-huge.xlsx` retains about 198MB after the sheet is loaded (peak about 415MB while parsing). `OpenRows` stays near 33MB. The file stays outside `make diffcheck`. Worksheets larger than 1MB of XML are not parsed until a cell is read.
 - Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells. `AddSlicer` still attaches a slicer to a pivot created with `AddPivotTable` or `BuildPivotTable`.
