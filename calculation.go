@@ -15,6 +15,12 @@ type CalculationEngine struct {
 	row, col  int
 	arrayMode bool
 	locals    map[string]interface{}
+	memo      map[string]calcMemo
+}
+
+type calcMemo struct {
+	v   interface{}
+	err error
 }
 
 // NewCalculationEngine creates a new calculation engine for a workbook.
@@ -31,6 +37,11 @@ func (ce *CalculationEngine) CalculateCell(ws *Worksheet, ref string) (interface
 	if cell.Type != CellTypeFormula {
 		return cell.Value, nil
 	}
+	freshMemo := ce.memo == nil
+	if freshMemo {
+		ce.memo = map[string]calcMemo{}
+		defer func() { ce.memo = nil }()
+	}
 	v, err := ce.evalFormulaCell(ws, cell)
 	if err != nil {
 		return nil, err
@@ -43,6 +54,10 @@ func (ce *CalculationEngine) CalculateCell(ws *Worksheet, ref string) (interface
 
 // CalculateAll evaluates all formula cells in the workbook.
 func (ce *CalculationEngine) CalculateAll() error {
+	if ce.memo == nil {
+		ce.memo = map[string]calcMemo{}
+		defer func() { ce.memo = nil }()
+	}
 	for i := 0; i < ce.workbook.SheetCount(); i++ {
 		ws, err := ce.workbook.GetSheet(i)
 		if err != nil {
@@ -50,7 +65,7 @@ func (ce *CalculationEngine) CalculateAll() error {
 		}
 		for _, cell := range ws.AllCells() {
 			if cell.Type == CellTypeFormula {
-				val, err := ce.evaluate(ws, cell.Formula)
+				val, err := ce.evalFormulaCell(ws, cell)
 				if err != nil {
 					msg := err.Error()
 					if strings.HasPrefix(msg, "#") {

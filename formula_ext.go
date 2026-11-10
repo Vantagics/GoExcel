@@ -548,15 +548,16 @@ func lookupHV(ce *CalculationEngine, ws *Worksheet, args string, vertical bool) 
 		found := -1
 		for r := 0; r < rg.rows; r++ {
 			cell := rg.values[r*rg.cols]
+			if compareValues(cell, key, "=") {
+				found = r
+				break
+			}
 			if approx {
-				if compareValues(cell, key, "<=") {
+				if compareValues(cell, key, "<") {
 					found = r
 				} else {
 					break
 				}
-			} else if compareValues(cell, key, "=") {
-				found = r
-				break
 			}
 		}
 		if found < 0 {
@@ -570,15 +571,16 @@ func lookupHV(ce *CalculationEngine, ws *Worksheet, args string, vertical bool) 
 	found := -1
 	for c := 0; c < rg.cols; c++ {
 		cell := rg.values[c]
+		if compareValues(cell, key, "=") {
+			found = c
+			break
+		}
 		if approx {
-			if compareValues(cell, key, "<=") {
+			if compareValues(cell, key, "<") {
 				found = c
 			} else {
 				break
 			}
-		} else if compareValues(cell, key, "=") {
-			found = c
-			break
 		}
 	}
 	if found < 0 {
@@ -1076,10 +1078,29 @@ func fnDate(ce *CalculationEngine, ws *Worksheet, args string) (interface{}, err
 	if err != nil {
 		return nil, err
 	}
-	yi := int(toFloat(y))
-	mi := int(toFloat(m))
-	di := int(toFloat(d))
-	if yi < 0 || yi > 9999 {
+	yn, err := ce.mustNum(y)
+	if err != nil {
+		return nil, err
+	}
+	mn, err := ce.mustNum(m)
+	if err != nil {
+		return nil, err
+	}
+	dn, err := ce.mustNum(d)
+	if err != nil {
+		return nil, err
+	}
+	// Excel truncates toward zero, and years 0..1899 are added to 1900.
+	yi := int(math.Trunc(yn))
+	mi := int(math.Trunc(mn))
+	di := int(math.Trunc(dn))
+	if yi < 0 {
+		return nil, fmt.Errorf("#NUM!")
+	}
+	if yi < 1900 {
+		yi += 1900
+	}
+	if yi > 9999 {
 		return nil, fmt.Errorf("#NUM!")
 	}
 	return excelDateSerial(yi, mi, di), nil

@@ -18,23 +18,44 @@ func powExcel(ln, rn float64) (interface{}, error) {
 type excelFault string
 
 func (ce *CalculationEngine) evalFormulaCell(ws *Worksheet, cell *Cell) (interface{}, error) {
+	key := ""
+	if ce.memo != nil && ws != nil {
+		ref, _ := CellName(cell.row, cell.col)
+		key = ws.Title() + "!" + ref
+		if hit, ok := ce.memo[key]; ok {
+			return hit.v, hit.err
+		}
+	}
+	finish := func(v interface{}, err error) (interface{}, error) {
+		if key != "" && ce.memo != nil {
+			ce.memo[key] = calcMemo{v: v, err: err}
+		}
+		return v, err
+	}
 	prevR, prevC, prevA := ce.row, ce.col, ce.arrayMode
 	ce.row, ce.col = cell.row, cell.col
 	ce.arrayMode = cell.arrayAnchor || cell.IsArrayFormula()
 	v, err := ce.evaluate(ws, cell.Formula)
 	if err != nil {
 		ce.row, ce.col, ce.arrayMode = prevR, prevC, prevA
-		return nil, err
+		return finish(nil, err)
 	}
 	var out interface{}
 	if ce.arrayMode {
 		out, err = ce.pickArrayCell(v, cell)
 	} else if rg, ok := v.(*formulaRange); ok {
 		if rg.virtual {
-			if len(rg.values) == 0 {
-				err = fmt.Errorf("#N/A")
-			} else if err = excelError(rg.values[0]); err == nil {
-				out = rg.values[0]
+			if rg.cellCount() > 1 {
+				if spillErr := ce.writeSpill(ws, cell, rg); spillErr != nil {
+					err = spillErr
+				}
+			}
+			if err == nil {
+				if len(rg.values) == 0 {
+					err = fmt.Errorf("#N/A")
+				} else if err = excelError(rg.values[0]); err == nil {
+					out = rg.values[0]
+				}
 			}
 		} else {
 			out, err = ce.asScalar(rg)
@@ -44,15 +65,15 @@ func (ce *CalculationEngine) evalFormulaCell(ws *Worksheet, cell *Cell) (interfa
 	}
 	ce.row, ce.col, ce.arrayMode = prevR, prevC, prevA
 	if err != nil {
-		return nil, err
+		return finish(nil, err)
 	}
 	if f, ok := out.(excelFault); ok {
-		return nil, fmt.Errorf("%s", string(f))
+		return finish(nil, fmt.Errorf("%s", string(f)))
 	}
 	if out == nil {
-		return 0.0, nil
+		return finish(0.0, nil)
 	}
-	return out, nil
+	return finish(out, nil)
 }
 
 func (ce *CalculationEngine) pickArrayCell(v interface{}, cell *Cell) (interface{}, error) {

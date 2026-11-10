@@ -49,6 +49,7 @@ type Workbook struct {
 	packageRels    []relationship
 	persons        []Person
 	nextID         int
+	dynamicArray   bool
 }
 
 // New creates a new workbook with a single default worksheet.

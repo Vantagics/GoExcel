@@ -328,41 +328,10 @@ func (c *Cell) GetFormattedValue() string {
 
 // formatDateByCode formats a time.Time according to a simple format code.
 func formatDateByCode(t time.Time, code string) string {
-	switch code {
-	case "yyyy-mm-dd":
-		return t.Format("2006-01-02")
-	case "yyyy-mm-dd hh:mm:ss":
-		return t.Format("2006-01-02 15:04:05")
-	case "hh:mm:ss", "h:mm:ss":
-		return t.Format("15:04:05")
-	case "m/d/yyyy", "mm/dd/yyyy":
-		return t.Format("01/02/2006")
-	case "dd/mm/yyyy":
-		return t.Format("02/01/2006")
-	default:
-		return t.Format("2006-01-02 15:04:05")
-	}
+	return formatByExcelCode(t, code)
 }
 
-// formatNumberByCode formats a float64 according to a simple format code.
+// formatNumberByCode formats a float64 according to an Excel format code.
 func formatNumberByCode(v float64, code string) string {
-	switch code {
-	case "General":
-		if v == float64(int64(v)) {
-			return fmt.Sprintf("%d", int64(v))
-		}
-		return fmt.Sprintf("%g", v)
-	case "0":
-		return fmt.Sprintf("%.0f", v)
-	case "0.00":
-		return fmt.Sprintf("%.2f", v)
-	case "0%":
-		return fmt.Sprintf("%.0f%%", v*100)
-	case "0.00%":
-		return fmt.Sprintf("%.2f%%", v*100)
-	case "@":
-		return fmt.Sprintf("%v", v)
-	default:
-		return fmt.Sprintf("%g", v)
-	}
+	return formatByExcelCode(v, code)
 }

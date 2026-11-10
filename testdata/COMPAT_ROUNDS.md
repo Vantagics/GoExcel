@@ -454,6 +454,40 @@ The sample is `FormulaEvalTestData_Copy.xlsx`, `shared_formulas.xlsx`, `r11/xw-s
 
 `go test ./...` passes. `python3 scripts/diffharness.py --roundtrip` on the full corpus (266 workbooks): **0 content defects**.
 
+## Round 17 — number formats, spill, and matrix functions
+
+### Number formats
+
+`TEXT` and formatted-value reads (`GetFormattedValue`, `OpenRows` with formatted values) share one Excel format renderer. It now handles:
+
+- elapsed `[h]`, `[m]`, `[s]` with remainders and fractional seconds
+- conditional sections such as `[>10]` and `[<=10]`, falling back to General when the condition misses
+- color names stripped from the text (`[Red]`, `[Color 3]`)
+- locale and currency brackets (`[$-409]`, `[$¥-804]`)
+- fractions (`# #/#`, fixed denominators)
+- scientific formats, including a multi-digit mantissa (`####.####E+0` → `12.3457E+4`)
+- the text section `@`
+- padding `_` (a space) and `*` (omitted in `TEXT`, which has no column width)
+- two-digit `y`/`yy`, `aaa`/`aaaa` weekdays, and literal East Asian date text such as `yyyy"年"m"月"d"日"`
+
+### Calculation
+
+- `DATE` truncates each component toward zero, and years 0 through 1899 are added to 1900, so `DATE(1,2,1)` is serial 398. Non-numeric components are `#VALUE!`.
+- Approximate `VLOOKUP`/`HLOOKUP` returns the first exact match and otherwise the last key that is still less than the lookup.
+- `CalculateAll` and `CalculateCell` memoize each cell, so a dependent formula sees the precedent's fresh result instead of recalculating it again or reading a stale cache.
+- Dynamic-array results spill. The anchor keeps `cm="1"` and a new workbook writes `xl/metadata.xml` with an `XLDAPR` record. A blocked spill is `#SPILL!`.
+- `MMULT`, `MDETERM`, and `MINVERSE` are implemented, along with `COLUMNS`, `ROWS`, `IRR`, `TIMEVALUE`, `NORM.DIST`, `NORM.S.DIST`, `POISSON.DIST`, `PERCENTILE.INC`, and `RANDBETWEEN`.
+
+### Agreement
+
+| Check | Before this round | After |
+| --- | --- | --- |
+| Sample workbooks, cached values among evaluated formulas | 1051/1087 (96%) | 1064/1096 (97%) |
+| Full corpus formula cells the engine evaluates | 8410/9280 (90.6%) | 8447/9280 (91.0%) |
+| Full corpus cached values among those | 7324/8393 (87.2%) | 7695/8423 (91.4%) |
+
+The generated workbook is still 69/69 in the engine and 66/69 in LibreOffice Calc 24.2. `go test ./...` passes.
+
 ## Remaining known gaps
 
 - openpyxl and POI do not read strict OOXML (POI bug 57699). goexcel reads it and can write it when asked. LibreOffice Calc opens a strict file written by goexcel.
@@ -465,7 +499,7 @@ The sample is `FormulaEvalTestData_Copy.xlsx`, `shared_formulas.xlsx`, `r11/xw-s
 - Extensible encryption is an external cipher provider. It is not implemented.
 - LibreOffice's refresh ignores pivot `fieldGroup`, so date and numeric groups stay as the precomputed cache labels in goexcel and become the base values after a LibreOffice recalc. Average and max can disappear in LibreOffice's compact layout.
 - `PivotFilter.Include` is an allow-list. A numeric field that is only a data field (not on an axis) has no discrete items to filter.
-- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. `OpenRows` applies formats only when `WithFormattedValues` is set. The calculation engine covers the functions in rounds 15 and 16. A dynamic-array formula returns its first value from the anchor; neighboring spill cells are not written. `RANDARRAY` is volatile and is not compared with cached values. `MMULT`, `MDETERM`, and `MINVERSE` are not implemented. About 710 cached `TEXT` results in the POI number-format suites still differ: elapsed `[h]`/`[m]`/`[s]` codes, conditional sections such as `[>10]`, and unusual scientific patterns. Other cache misses are approximate `HLOOKUP`, `DATE` of components outside a normal year, and aggregates whose inputs are themselves formulas with a different cached result. LibreOffice 24.2 still returns `#NAME?` for `_xlfn.XLOOKUP` and `#VALUE!` for `SUM` of a defined name that this engine evaluates. Unknown functions still rely on `fullCalcOnLoad`.
+- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. `OpenRows` applies formats only when `WithFormattedValues` is set. The calculation engine covers the functions in rounds 15 through 17. Dynamic-array spill writes the block next to the anchor and records `XLDAPR` metadata on workbooks created here; a file that already has `xl/metadata.xml` keeps that part. `RANDARRAY` and `RANDBETWEEN` are volatile and are not compared with cached values. Some POI format cases still differ: a few `?` padding widths, fraction patterns that interleave literals (`#-#-#:#/#`), and `General` for a handful of magnitudes. Aggregates whose precedents are themselves wrong still disagree with Excel's cached total. LibreOffice 24.2 still returns `#NAME?` for `_xlfn.XLOOKUP` and `#VALUE!` for `SUM` of a defined name that this engine evaluates, and it does not use Excel's boolean-versus-text order. Unknown functions still rely on `fullCalcOnLoad`.
 - LibreOffice 24.2 reports `#NAME?` for `_xlfn.UNIQUE` and recalculates some cached formula results (the 4,000-row sheet's cached `0` becomes the computed total). Its converter stored `IF(A1>1,"yes","no")` as numeric 0. Those are recalc gaps. openpyxl still refuses a workbook whose relationship points at a missing `xl/sharedStrings.xml`.
 - `OpenFile` of `testdata/perf/ej-huge.xlsx` retains about 198MB after the sheet is loaded (peak about 415MB while parsing). `OpenRows` stays near 33MB. The file stays outside `make diffcheck`. Worksheets larger than 1MB of XML are not parsed until a cell is read.
 - Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells. `AddSlicer` still attaches a slicer to a pivot created with `AddPivotTable` or `BuildPivotTable`.

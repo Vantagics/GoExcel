@@ -196,6 +196,9 @@ func (w *XLSXWriter) writePackage(zw *zip.Writer, wb *Workbook) error {
 	if err := w.writeCellImages(zw, wb); err != nil {
 		return err
 	}
+	if err := w.writeDynamicArrayMeta(zw, wb); err != nil {
+		return err
+	}
 	if err := w.writeThreads(zw, wb); err != nil {
 		return err
 	}
@@ -468,11 +471,17 @@ func (w *XLSXWriter) writeContentTypes(zw *zip.Writer, wb *Workbook, plans []she
 	fmt.Fprintf(&b, `<Override PartName="/xl/workbook.xml" ContentType="%s"/>`, wbCT)
 	b.WriteString(`<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>`)
 	b.WriteString(`<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>`)
+	if wb != nil && wb.dynamicArray && !wb.hasCellImages() {
+		b.WriteString(`<Override PartName="/xl/metadata.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml"/>`)
+	}
 	b.WriteString(`<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`)
 	b.WriteString(`<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>`)
 	seen := map[string]bool{
 		"/xl/workbook.xml": true, "/xl/styles.xml": true, "/xl/sharedstrings.xml": true,
 		"/docprops/core.xml": true, "/docprops/app.xml": true,
+	}
+	if wb != nil && wb.dynamicArray && !wb.hasCellImages() {
+		seen["/xl/metadata.xml"] = true
 	}
 	for _, p := range plans {
 		part := "/" + p.partName
@@ -626,6 +635,9 @@ func (w *XLSXWriter) writeWorkbookRels(zw *zip.Writer, wb *Workbook, plans []she
 				fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2007/relationships/slicerCache" Target="%s"/>`, id, strings.TrimPrefix(s.author.cachePart, "xl/"))
 			}
 		}
+	}
+	if wb != nil && wb.dynamicArray && !wb.hasCellImages() {
+		fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sheetMetadata" Target="metadata.xml"/>`, nextRelID(used))
 	}
 	if wb != nil && wb.hasCellImages() {
 		fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sheetMetadata" Target="metadata.xml"/>`, nextRelID(used))

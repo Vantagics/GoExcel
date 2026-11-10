@@ -341,14 +341,14 @@ func (it *RowIterator) applyFormat(cell *StreamCell, styleIdx int) {
 			t := serialToDate(serial)
 			cell.Value = t
 			cell.Type = CellTypeDate
-			cell.Formatted = formatDateByCode(t, code)
+			cell.Formatted = formatByExcelCode(serial, code)
 			return
 		}
-		cell.Formatted = formatNumberByCode(v, code)
+		cell.Formatted = formatByExcelCode(v, code)
 	case time.Time:
-		cell.Formatted = formatDateByCode(v, code)
+		cell.Formatted = formatByExcelCode(v, code)
 	case string:
-		cell.Formatted = v
+		cell.Formatted = formatByExcelCode(v, code)
 	case bool:
 		if v {
 			cell.Formatted = "TRUE"
