@@ -488,6 +488,40 @@ The sample is `FormulaEvalTestData_Copy.xlsx`, `shared_formulas.xlsx`, `r11/xw-s
 
 The generated workbook is still 69/69 in the engine and 66/69 in LibreOffice Calc 24.2. `go test ./...` passes. `python3 scripts/diffharness.py --roundtrip` on the full corpus (266 workbooks): **0 content defects**.
 
+## Round 18 — format edges and more evaluable formulas
+
+### Number formats
+
+The remaining POI format-suite gaps from round 17 are closed for the cases Excel's cached text defines:
+
+- `?` padding counts grouping commas, so `?,?????????` of 1234567 is four leading spaces plus `1,234,567`.
+- Fraction patterns with literals between digit placeholders keep those literals. `23.75` with `#-#-#:#/#` is `-2-3:3/4`, and `0.75` is `--3/4` (the colon is omitted when the whole-number digits are all insignificant).
+- `General` uses a fixed decimal for magnitudes down to `1e-9` (`0.000000001`, not `1e-09`), scientific notation with an explicit exponent sign above `1e11` (`1E+11`), and at most six significant digits in that scientific form (`1.12345E+11`). `TEXT(TRUE,"General")` is `TRUE`.
+- Negative elapsed times take the absolute duration and a leading minus, so `[h]:m:s` of −7384 seconds is `-2:3:4.000` rather than `3:3:4.000`.
+- A percent that lands on a binary halfway value (`0.00035` with `0.00%`) rounds the same way Excel does (`0.04%`).
+
+`TestFormatMatchesExcelCache` checks every formula on the Tests sheet of `ElapsedFormatTests.xlsx`, `DateFormatTests.xlsx`, `FormatConditionTests.xlsx`, and `GeneralFormatTests.xlsx` against the cached value Excel stored.
+
+### Formulas
+
+Formulas may contain newlines; `B1\n+B2` evaluates. A repeated percent sign (`1000%%`) is applied once per sign. New functions, chosen from the names the corpus still could not evaluate: `RATE`, `BINOM.DIST`, `EXPON.DIST`, `COVARIANCE.P`, `COVARIANCE.S`, `ERF.PRECISE`, `ERFC.PRECISE`, `CONFIDENCE.NORM`, `PERCENTILE.EXC`, `NEGBINOM.DIST`, `HYPGEOM.DIST`, `GEOMEAN`, `HARMEAN`, `ISEVEN`, `ISODD`, `ISOWEEKNUM`, `WEEKNUM`, and `DELTA`.
+
+`SplitsItems` in `lo-XlStartupExternal.xlsx` is a name defined in another workbook, not a function. `TABLE(...)` is an Excel data-table formula. Both stay `#NAME?` for Excel to calculate via `fullCalcOnLoad`. LibreOffice 24.2 still reports `#NAME?` for `_xlfn.XLOOKUP` and does not order booleans above text; those are reference-tool gaps.
+
+### Sample
+
+`testdata/excel/r18/formats-and-matrix.xlsx` is a workbook written for this round: percent, `?` padding, an interleaved fraction, elapsed time, a date, `General` at `1e11`, `TEXT`, `BINOM.DIST`, `ERF.PRECISE`, `EXPON.DIST`, `MMULT`, `MDETERM`, `DATE(1,2,1)`, and `1000%%`.
+
+### Agreement
+
+| Check | Before this round | After |
+| --- | --- | --- |
+| Sample workbooks, cached values among evaluated formulas | 1064/1096 (97%) | 1066/1098 (97%) |
+| Full corpus formula cells the engine evaluates | 8447/9280 (91.0%) | 8507/9280 (91.7%) |
+| Full corpus cached values among those | 7695/8423 (91.4%) | 7862/8483 (92.7%) |
+
+The generated engine fixture stays 69/69, and LibreOffice Calc 24.2 stays 66/69 on it. `go test ./...` passes.
+
 ## Remaining known gaps
 
 - openpyxl and POI do not read strict OOXML (POI bug 57699). goexcel reads it and can write it when asked. LibreOffice Calc opens a strict file written by goexcel.
@@ -499,7 +533,7 @@ The generated workbook is still 69/69 in the engine and 66/69 in LibreOffice Cal
 - Extensible encryption is an external cipher provider. It is not implemented.
 - LibreOffice's refresh ignores pivot `fieldGroup`, so date and numeric groups stay as the precomputed cache labels in goexcel and become the base values after a LibreOffice recalc. Average and max can disappear in LibreOffice's compact layout.
 - `PivotFilter.Include` is an allow-list. A numeric field that is only a data field (not on an axis) has no discrete items to filter.
-- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. `OpenRows` applies formats only when `WithFormattedValues` is set. The calculation engine covers the functions in rounds 15 through 17. Dynamic-array spill writes the block next to the anchor and records `XLDAPR` metadata on workbooks created here; a file that already has `xl/metadata.xml` keeps that part. `RANDARRAY` and `RANDBETWEEN` are volatile and are not compared with cached values. Some POI format cases still differ: a few `?` padding widths, fraction patterns that interleave literals (`#-#-#:#/#`), and `General` for a handful of magnitudes. Aggregates whose precedents are themselves wrong still disagree with Excel's cached total. LibreOffice 24.2 still returns `#NAME?` for `_xlfn.XLOOKUP` and `#VALUE!` for `SUM` of a defined name that this engine evaluates, and it does not use Excel's boolean-versus-text order. Unknown functions still rely on `fullCalcOnLoad`.
+- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. `OpenRows` applies formats only when `WithFormattedValues` is set. The calculation engine covers the functions in rounds 15 through 18. Dynamic-array spill writes the block next to the anchor and records `XLDAPR` metadata on workbooks created here; a file that already has `xl/metadata.xml` keeps that part. `RANDARRAY` and `RANDBETWEEN` are volatile and are not compared with cached values. The POI number-format suite still has scientific edge cases (a zero mantissa written as `0e0` in some bracket layouts) and some fraction patterns beyond the interleaved `#-#-#` form. `SplitsItems(...)` is an external defined name, and `TABLE(...)` is a data table; both stay on `fullCalcOnLoad`. Aggregates whose own inputs still disagree with Excel keep that disagreement in the total. LibreOffice 24.2 returns `#NAME?` for `_xlfn.XLOOKUP` and `#VALUE!` for `SUM` of a defined name, and it compares `FALSE>"TRUE"` as false. Those are LibreOffice gaps. Unknown functions still rely on `fullCalcOnLoad`.
 - LibreOffice 24.2 reports `#NAME?` for `_xlfn.UNIQUE` and recalculates some cached formula results (the 4,000-row sheet's cached `0` becomes the computed total). Its converter stored `IF(A1>1,"yes","no")` as numeric 0. Those are recalc gaps. openpyxl still refuses a workbook whose relationship points at a missing `xl/sharedStrings.xml`.
 - `OpenFile` of `testdata/perf/ej-huge.xlsx` retains about 198MB after the sheet is loaded (peak about 415MB while parsing). `OpenRows` stays near 33MB. The file stays outside `make diffcheck`. Worksheets larger than 1MB of XML are not parsed until a cell is read.
 - Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells. `AddSlicer` still attaches a slicer to a pivot created with `AddPivotTable` or `BuildPivotTable`.

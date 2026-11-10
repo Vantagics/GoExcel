@@ -79,6 +79,54 @@ func TestMatrixAndSpill(t *testing.T) {
 	_ = files
 }
 
+func TestFormatMatchesExcelCache(t *testing.T) {
+	// Cached values in these workbooks were written by Excel.
+	for _, file := range []string{
+		"ElapsedFormatTests.xlsx",
+		"DateFormatTests.xlsx",
+		"FormatConditionTests.xlsx",
+		"GeneralFormatTests.xlsx",
+	} {
+		wb, err := OpenFile("testdata/excel/" + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ws, err := wb.GetSheetByName("Tests")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ce := NewCalculationEngine(wb)
+		checked := 0
+		for _, cell := range ws.AllCells() {
+			if cell.Type != CellTypeFormula || cell.Value == nil {
+				continue
+			}
+			ref, _ := CellName(cell.row, cell.col)
+			got, err := ce.CalculateCell(ws, ref)
+			if err != nil {
+				t.Errorf("%s %s: %v", file, ref, err)
+				continue
+			}
+			checked++
+			if !calcEqual(got, cell.Value) {
+				t.Errorf("%s %s got %#v cached %#v", file, ref, got, cell.Value)
+			}
+		}
+		if checked == 0 {
+			t.Fatalf("%s: no formulas", file)
+		}
+	}
+	if got := formatByExcelCode(1e11, "General"); got != "1E+11" {
+		t.Errorf("General 1e11 = %q", got)
+	}
+	if got := formatByExcelCode(23.75, `|#-#-#\:#/#|`); got != "|-2-3:3/4|" {
+		t.Errorf("interleaved fraction = %q", got)
+	}
+	if got := formatByExcelCode(1234567.0, "?,?????????"); got != "    1,234,567" {
+		t.Errorf("question padding = %q", got)
+	}
+}
+
 func TestTextElapsedAndConditional(t *testing.T) {
 	if got := formatByExcelCode(3.14159, "[s].000"); got != "271433.376" {
 		t.Fatalf("[s].000 = %q", got)

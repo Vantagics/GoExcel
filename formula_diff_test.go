@@ -317,10 +317,10 @@ func TestCorpusCachedFormulas(t *testing.T) {
 		return nil
 	})
 	t.Logf("corpus formulas %d evaluated %d cached match %d/%d", total, evaluated, fullMatched, fullChecked)
-	if total == 0 || evaluated*100/total < 85 {
+	if total == 0 || evaluated*100/total < 90 {
 		t.Fatalf("evaluable formulas %d/%d", evaluated, total)
 	}
-	if fullChecked == 0 || fullMatched*100/fullChecked < 85 {
+	if fullChecked == 0 || fullMatched*100/fullChecked < 91 {
 		t.Fatalf("full corpus match %d/%d", fullMatched, fullChecked)
 	}
 }

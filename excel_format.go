@@ -13,6 +13,12 @@ import (
 // TEXT function and formatted cell reads.
 func formatByExcelCode(v interface{}, code string) string {
 	code = strings.TrimSpace(code)
+	if b, ok := v.(bool); ok && (code == "" || strings.EqualFold(code, "General") || code == "@") {
+		if b {
+			return "TRUE"
+		}
+		return "FALSE"
+	}
 	if code == "" || strings.EqualFold(code, "General") {
 		if n, ok := asNumber(v, true); ok {
 			return formatGeneral(n)
@@ -69,24 +75,46 @@ func formatGeneral(n float64) string {
 	}
 	a := math.Abs(n)
 	if a >= 1e11 || (a > 0 && a < 1e-9) {
-		return excelGeneralSci(n)
+		return excelGeneralSci(n, 6)
 	}
-	if a >= 1e10 {
-		return strconv.FormatFloat(n, 'f', 0, 64)
+	s := strconv.FormatFloat(n, 'g', 10, 64)
+	if strings.ContainsAny(s, "eE") {
+		s = trimTrailingZeros(strconv.FormatFloat(n, 'f', 12, 64))
 	}
-	return strconv.FormatFloat(n, 'g', 10, 64)
+	return s
 }
 
-func excelGeneralSci(n float64) string {
+func excelGeneralSci(n float64, sig int) string {
 	sign := ""
 	if n < 0 {
 		sign = "-"
 		n = -n
 	}
-	exp := int(math.Floor(math.Log10(n)))
+	exp := int(math.Floor(math.Log10(n) + 1e-12))
 	mant := n / math.Pow(10, float64(exp))
-	ms := strconv.FormatFloat(mant, 'g', 10, 64)
+	p := math.Pow(10, float64(sig-1))
+	mant = math.Round(mant*p) / p
+	if mant >= 10 {
+		mant /= 10
+		exp++
+	}
+	ms := trimTrailingZeros(strconv.FormatFloat(mant, 'f', sig-1, 64))
+	if exp >= 0 {
+		return sign + ms + "E+" + strconv.Itoa(exp)
+	}
 	return sign + ms + "E" + strconv.Itoa(exp)
+}
+
+func trimTrailingZeros(s string) string {
+	if !strings.Contains(s, ".") {
+		return s
+	}
+	s = strings.TrimRight(s, "0")
+	s = strings.TrimRight(s, ".")
+	if s == "" || s == "-" {
+		return "0"
+	}
+	return s
 }
 
 func firstTextSection(sections []string) string {
@@ -490,8 +518,9 @@ func formatFixed(n float64, toks []tok) string {
 		pow = 1
 	}
 	scaled := n * pow
-	if math.Abs(scaled-math.Round(scaled)) < 1e-8 {
-		scaled = math.Round(scaled)
+	nearestHalf := math.Floor(scaled) + 0.5
+	if math.Abs(scaled-nearestHalf) < 1e-8 {
+		scaled = nearestHalf
 	}
 	rounded := math.Round(scaled) / pow
 	intPart := math.Floor(rounded + 1e-9)
@@ -507,17 +536,27 @@ func formatFixed(n float64, toks []tok) string {
 	if intStr == "0" && minZero == 0 && !strings.ContainsRune(string(intPh), '0') && intPart == 0 {
 		intStr = ""
 	}
+	if grouping && intStr != "" {
+		intStr = withCommas(intStr)
+	}
 	spaces := 0
-	if len(intPh) > len(intStr) {
-		extra := len(intPh) - len(intStr)
+	if grouping && len(intPh) > 0 && countByte(intPh, '?') == len(intPh) {
+		fullCommas := 0
+		if len(intPh) > 0 {
+			fullCommas = (len(intPh) - 1) / 3
+		}
+		width := len(intPh) + fullCommas
+		if width > len(intStr) {
+			spaces = width - len(intStr)
+		}
+	} else if len(intPh) > len(strings.ReplaceAll(intStr, ",", "")) {
+		rawLen := len(strings.ReplaceAll(intStr, ",", ""))
+		extra := len(intPh) - rawLen
 		for i := 0; i < extra && i < len(intPh); i++ {
 			if intPh[i] == '?' {
 				spaces++
 			}
 		}
-	}
-	if grouping && intStr != "" {
-		intStr = withCommas(intStr)
 	}
 	fracStr := ""
 	showDot := len(fracPh) > 0 || hasDot(toks)
@@ -704,6 +743,9 @@ func formatScientific(n float64, toks []tok, ei int) string {
 		n = n / math.Pow(10, float64(exp))
 	}
 	body := formatFixed(n, mant)
+	if !digitIn(body) {
+		body += "0"
+	}
 	return sign + body + formatExp(exp, marker, expToks)
 }
 
@@ -825,18 +867,22 @@ func formatFraction(n float64, toks []tok, slash int) string {
 		b.WriteByte('-')
 	}
 	b.WriteString(prefix)
-	if mixed && (whole != 0 || leadingZero(toks)) {
-		b.WriteString(strconv.FormatFloat(whole, 'f', 0, 64))
-		if sep == "" {
-			sep = " "
-		}
-		b.WriteString(sep)
+	wholeText := ""
+	if mixed {
+		wholeText = renderWhole(wholeToksFrom(toks, slash), int(whole))
+		b.WriteString(wholeText)
 	}
 	if num == 0 && mixed {
-		if whole == 0 {
+		if whole == 0 && wholeText == "" {
 			b.WriteByte('0')
 		}
 	} else {
+		if mixed && (sep == " " || digitIn(wholeText)) {
+			if sep == "" {
+				sep = " "
+			}
+			b.WriteString(sep)
+		}
 		b.WriteString(padPh(strconv.Itoa(num), numPh))
 		b.WriteByte('/')
 		b.WriteString(padPh(strconv.Itoa(den), denPh))
@@ -852,6 +898,115 @@ func leadingZero(toks []tok) bool {
 		}
 	}
 	return false
+}
+
+func wholeToksFrom(toks []tok, slash int) []tok {
+	i := slash - 1
+	for i >= 0 && isPh(toks[i].k) {
+		i--
+	}
+	for i >= 0 && !isPh(toks[i].k) {
+		i--
+	}
+	if i < 0 {
+		return nil
+	}
+	end := i
+	start := i
+	for start > 0 {
+		prev := toks[start-1]
+		if isPh(prev.k) {
+			start--
+			continue
+		}
+		if prev.k == 'L' && prev.text != "|" {
+			found := false
+			for k := start - 2; k >= 0; k-- {
+				if toks[k].k == 'L' && toks[k].text == "|" {
+					break
+				}
+				if isPh(toks[k].k) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				break
+			}
+			start--
+			continue
+		}
+		break
+	}
+	return toks[start : end+1]
+}
+
+func renderWhole(tokens []tok, n int) string {
+	if len(tokens) == 0 {
+		if n == 0 {
+			return ""
+		}
+		return strconv.Itoa(n)
+	}
+	var idx []int
+	for i, t := range tokens {
+		if isPh(t.k) {
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) == 0 {
+		return strconv.Itoa(n)
+	}
+	digits := ""
+	if n != 0 {
+		digits = strconv.Itoa(n)
+	}
+	assigned := make([]string, len(tokens))
+	di := len(digits)
+	for k := len(idx) - 1; k >= 1; k-- {
+		i := idx[k]
+		if di > 0 {
+			di--
+			assigned[i] = digits[di : di+1]
+		} else {
+			assigned[i] = emptyPlaceholder(tokens[i].k)
+		}
+	}
+	i0 := idx[0]
+	if di > 0 {
+		assigned[i0] = digits[:di]
+	} else {
+		assigned[i0] = emptyPlaceholder(tokens[i0].k)
+	}
+	var b strings.Builder
+	for i, t := range tokens {
+		if isPh(t.k) {
+			b.WriteString(assigned[i])
+		} else if t.k == 'L' {
+			b.WriteString(t.text)
+		}
+	}
+	return b.String()
+}
+
+func digitIn(s string) bool {
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+func emptyPlaceholder(k byte) string {
+	switch k {
+	case '0':
+		return "0"
+	case '?':
+		return " "
+	default:
+		return ""
+	}
 }
 
 func padPh(s string, ph []byte) string {
@@ -899,8 +1054,29 @@ func fractionParts(toks []tok, slash int) (numPh, denPh []byte, denFixed int, pr
 		denFixed, _ = strconv.Atoi(fixed)
 	}
 	cut := orig + 1
+	wholeStart := 0
 	if mixed {
-		cut = i + 1
+		wholeStart = i
+		for wholeStart > 0 && (isPh(toks[wholeStart-1].k) || (toks[wholeStart-1].k == 'L' && toks[wholeStart-1].text != "|")) {
+			// Keep literals that sit between whole-number placeholders.
+			if toks[wholeStart-1].k == 'L' {
+				prevPh := false
+				for k := wholeStart - 2; k >= 0; k-- {
+					if isPh(toks[k].k) {
+						prevPh = true
+						break
+					}
+					if toks[k].k == 'L' && (toks[k].text == "|" || toks[k].text == " ") {
+						break
+					}
+				}
+				if !prevPh {
+					break
+				}
+			}
+			wholeStart--
+		}
+		cut = wholeStart
 	}
 	var pre strings.Builder
 	for _, t := range toks[:max(0, cut)] {
@@ -908,6 +1084,7 @@ func fractionParts(toks []tok, slash int) (numPh, denPh []byte, denFixed int, pr
 			pre.WriteString(t.text)
 		}
 	}
+	_ = wholeStart
 	// Drop the separating space from the prefix when it belongs to the mixed number.
 	ps := pre.String()
 	if mixed {
@@ -1235,6 +1412,14 @@ func minuteInFormat(low string) bool {
 }
 
 func formatElapsed(serial float64, code string) string {
+	body := formatElapsedBody(serial, code)
+	if serial < 0 && body != "" && !strings.HasPrefix(body, "-") {
+		return "-" + body
+	}
+	return body
+}
+
+func formatElapsedBody(serial float64, code string) string {
 	secTotal := serial * 86400
 	var b strings.Builder
 	inQ := false
@@ -1336,21 +1521,16 @@ func elapsedNumber(sec float64, token string) string {
 		padWidth = len(token)
 	}
 	var n float64
+	sec = math.Abs(sec)
 	switch token[:1] {
 	case "h":
 		n = math.Floor(sec / 3600)
 	case "m":
-		if strings.Contains(token, "h") {
-			n = math.Floor(sec / 60)
-		}
 		n = math.Floor(sec / 60)
 	case "s":
 		n = math.Floor(sec)
 	default:
 		return ""
-	}
-	if n < 0 {
-		n = -n
 	}
 	s := strconv.FormatFloat(n, 'f', 0, 64)
 	if padWidth > 1 {

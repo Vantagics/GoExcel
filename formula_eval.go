@@ -54,7 +54,7 @@ type formulaParser struct {
 }
 
 func (p *formulaParser) skip() {
-	for p.i < len(p.s) && (p.s[p.i] == ' ' || p.s[p.i] == '\t') {
+	for p.i < len(p.s) && (p.s[p.i] == ' ' || p.s[p.i] == '\t' || p.s[p.i] == '\n' || p.s[p.i] == '\r') {
 		p.i++
 	}
 }
@@ -206,8 +206,11 @@ func (p *formulaParser) parseUnary() (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	p.skip()
-	if p.i < len(p.s) && p.s[p.i] == '%' {
+	for {
+		p.skip()
+		if p.i >= len(p.s) || p.s[p.i] != '%' {
+			return v, nil
+		}
 		p.i++
 		sv, err := p.ce.asScalar(v)
 		if err != nil {
@@ -217,9 +220,8 @@ func (p *formulaParser) parseUnary() (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		return n / 100, nil
+		v = n / 100
 	}
-	return v, nil
 }
 
 func (p *formulaParser) parsePrimary() (interface{}, error) {
