@@ -486,7 +486,7 @@ The sample is `FormulaEvalTestData_Copy.xlsx`, `shared_formulas.xlsx`, `r11/xw-s
 | Full corpus formula cells the engine evaluates | 8410/9280 (90.6%) | 8447/9280 (91.0%) |
 | Full corpus cached values among those | 7324/8393 (87.2%) | 7695/8423 (91.4%) |
 
-The generated workbook is still 69/69 in the engine and 66/69 in LibreOffice Calc 24.2. `go test ./...` passes.
+The generated workbook is still 69/69 in the engine and 66/69 in LibreOffice Calc 24.2. `go test ./...` passes. `python3 scripts/diffharness.py --roundtrip` on the full corpus (266 workbooks): **0 content defects**.
 
 ## Remaining known gaps
 
