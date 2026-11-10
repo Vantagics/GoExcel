@@ -452,7 +452,7 @@ The round 15 engine matched 560 of 653 cached values on the formula sample (85%)
 
 The sample is `FormulaEvalTestData_Copy.xlsx`, `shared_formulas.xlsx`, `r11/xw-sales.xlsx`, `r12/ej-fibonacci.xlsx`, `r13/ps-sharedformula.xlsx`, and `r13/npoi-matrix.xlsx`. `RAND`, `RANDBETWEEN`, `RANDARRAY`, `NOW`, and `TODAY` are not part of the cache comparison.
 
-`go test ./...` passes. The file round-trip of the corpus is unchanged by the calculation engine.
+`go test ./...` passes. `python3 scripts/diffharness.py --roundtrip` on the full corpus (266 workbooks): **0 content defects**.
 
 ## Remaining known gaps
 
