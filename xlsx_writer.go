@@ -2,6 +2,7 @@ package gospreadsheet
 
 import (
 	"archive/zip"
+	"bytes"
 	"fmt"
 	"io"
 	"math"
@@ -9,7 +10,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+)
+
+// writeStrict is set for the duration of XLSXWriter.Write. Write holds writeMu.
+var (
+	writeMu     sync.Mutex
+	writeStrict bool
 )
 
 // XLSXWriter writes a Workbook to XLSX format.
@@ -38,7 +46,32 @@ func (w *XLSXWriter) Save(wb *Workbook, filename string) error {
 }
 
 // Write writes the workbook to an io.Writer.
+// When the workbook has a password, the bytes are an ECMA-376 Agile encrypted
+// OLE package rather than a zip. When strict OOXML is requested, generated
+// and preserved XML parts use strict namespaces.
 func (w *XLSXWriter) Write(wb *Workbook, writer io.Writer) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	writeStrict = wb != nil && wb.strictOOXML
+	defer func() { writeStrict = false }()
+	if wb != nil && wb.writePassword != "" {
+		var buf bytes.Buffer
+		if err := w.writeUnencrypted(wb, &buf); err != nil {
+			return err
+		}
+		enc, err := EncryptPackage(buf.Bytes(), wb.writePassword)
+		if err != nil {
+			return err
+		}
+		if _, err := writer.Write(enc); err != nil {
+			return fmt.Errorf("writing encrypted package: %w", err)
+		}
+		return nil
+	}
+	return w.writeUnencrypted(wb, writer)
+}
+
+func (w *XLSXWriter) writeUnencrypted(wb *Workbook, writer io.Writer) error {
 	zw := zip.NewWriter(writer)
 	if err := w.writePackage(zw, wb); err != nil {
 		_ = zw.Close()
@@ -51,6 +84,9 @@ func (w *XLSXWriter) Write(wb *Workbook, writer io.Writer) error {
 }
 
 func (w *XLSXWriter) writePackage(zw *zip.Writer, wb *Workbook) error {
+	if wb != nil {
+		wb.applyFeatureEdits()
+	}
 	reg := newStyleRegistry(wb)
 	sst := collectSharedStrings(wb)
 	plans := make([]sheetPlan, len(wb.worksheets))
@@ -170,12 +206,36 @@ func writeZip(zw *zip.Writer, name, content string) error {
 }
 
 func writeZipBytes(zw *zip.Writer, name string, content []byte) error {
+	if writeStrict && strictXMLPart(name) {
+		content = []byte(toStrictOOXML(string(content)))
+	}
 	f, err := zw.Create(name)
 	if err != nil {
 		return err
 	}
 	_, err = f.Write(content)
 	return err
+}
+
+func strictXMLPart(name string) bool {
+	l := strings.ToLower(name)
+	return strings.HasSuffix(l, ".xml") || strings.HasSuffix(l, ".rels")
+}
+
+// toStrictOOXML rewrites transitional document namespaces to the strict
+// ECMA-376 URIs Excel writes. Package relationship and content-type
+// namespaces stay on the transitional OPC URIs, matching real strict files.
+func toStrictOOXML(s string) string {
+	replacer := strings.NewReplacer(
+		"http://schemas.openxmlformats.org/spreadsheetml/2006/main", "http://purl.oclc.org/ooxml/spreadsheetml/main",
+		"http://schemas.openxmlformats.org/officeDocument/2006/relationships", "http://purl.oclc.org/ooxml/officeDocument/relationships",
+		"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties", "http://purl.oclc.org/ooxml/officeDocument/extendedProperties",
+		"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes", "http://purl.oclc.org/ooxml/officeDocument/docPropsVTypes",
+		"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing", "http://purl.oclc.org/ooxml/drawingml/spreadsheetDrawing",
+		"http://schemas.openxmlformats.org/drawingml/2006/chart", "http://purl.oclc.org/ooxml/drawingml/chart",
+		"http://schemas.openxmlformats.org/drawingml/2006/main", "http://purl.oclc.org/ooxml/drawingml/main",
+	)
+	return replacer.Replace(s)
 }
 
 type sheetPlan struct {
@@ -463,6 +523,9 @@ func (w *XLSXWriter) writeWorkbookXML(zw *zip.Writer, wb *Workbook, plans []shee
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
 	b.WriteString(`<workbook xmlns="` + spreadsheetNS + `" xmlns:r="` + relNS + `"`)
+	if wb.strictOOXML {
+		b.WriteString(` conformance="strict"`)
+	}
 	b.WriteString(wb.extraRootAttrs)
 	b.WriteString(`>`)
 	writePreservedNamed(&b, wb.preserved, "fileVersion")
@@ -1080,6 +1143,9 @@ func writeFormulaCell(b *strings.Builder, wb *Workbook, c *Cell) {
 	}
 	kind := ""
 	ref := c.formulaRef
+	if c.arrayAnchor {
+		kind = "array"
+	}
 	if strings.HasPrefix(formula, "{") && strings.HasSuffix(formula, "}") && len(formula) >= 2 {
 		formula = formula[1 : len(formula)-1]
 		kind = "array"

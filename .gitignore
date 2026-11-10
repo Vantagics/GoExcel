@@ -1,4 +1,5 @@
 test.xlsx
 read_test_main.go
+xlsxdump
 
 *.class

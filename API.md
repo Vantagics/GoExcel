@@ -473,8 +473,8 @@ type CellReference struct {
 
 | 函数 | 说明 |
 |------|------|
-| `OpenFile(filename string) (*Workbook, error)` | 按扩展名自动选择读取器（.xlsx / .csv） |
-| `SaveFile(wb *Workbook, filename string) error` | 按扩展名自动选择写入器 |
+| `OpenFile(filename string, opts ...Option) (*Workbook, error)` | 按扩展名自动选择读取器。.xlsx 可用 `WithPassword` 打开 ECMA-376 加密文件 |
+| `SaveFile(wb *Workbook, filename string) error` | 按扩展名自动选择写入器。`SetPassword` 会写成 Agile 加密包 |
 
 ### XLSXReader / XLSXWriter
 
@@ -482,10 +482,23 @@ type CellReference struct {
 |-----------|------|
 | `NewXLSXReader() *XLSXReader` | 创建 XLSX 读取器 |
 | `(*XLSXReader) Open(filename string) (*Workbook, error)` | 从文件读取 |
-| `(*XLSXReader) Read(reader io.ReaderAt, size int64) (*Workbook, error)` | 从 io.ReaderAt 读取 |
+| `(*XLSXReader) Read(reader io.ReaderAt, size int64) (*Workbook, error)` | 从 io.ReaderAt 读取。加密包返回 `ErrPasswordRequired` |
+| `(*XLSXReader) OpenPassword / ReadPassword` | 解密 Agile 或 Standard 加密后再读取 |
+| `DecryptPackage` / `EncryptPackage` | 解密或按 Agile 加密 OOXML 包 |
 | `NewXLSXWriter() *XLSXWriter` | 创建 XLSX 写入器 |
 | `(*XLSXWriter) Save(wb *Workbook, filename string) error` | 保存到文件 |
-| `(*XLSXWriter) Write(wb *Workbook, writer io.Writer) error` | 写入到 io.Writer |
+| `(*XLSXWriter) Write(wb *Workbook, writer io.Writer) error` | 写入到 io.Writer。设置了密码时写出 OLE 加密包；`SetStrictOOXML(true)` 写出严格 OOXML，默认仍是过渡命名空间。 |
+
+### 数组公式、迷你图、切片器、数据透视表
+
+| API | 说明 |
+|-----|------|
+| `(*Worksheet) SetArrayFormula(rangeRef, formula string) error` | 在锚点单元格写入数组公式，区域内每个单元格都报告该公式 |
+| `(*Worksheet) FormulaAt(ref string) (formula, arrayRef string, err error)` | 返回 Excel 公式栏会显示的公式；若属于数组公式，同时返回 ref |
+| `(*Cell) ArrayRef / IsArrayFormula / ReportedFormula` | 数组区域与公式文本，包括只落在 ref 内的单元格 |
+| `(*Worksheet) SparklineGroups / SetSparklineGroups` | 读取或替换迷你图（类型、标记、颜色、公式、单元格） |
+| `(*Worksheet) PivotTables` | 透视表名称、位置、数据标题、样式和字段。`SetName`、`SetLocation`、`SetDataCaption`、`SetStyle` 写回这些属性 |
+| `(*Worksheet) Slicers` / `(*Workbook) SlicerCaches` | 标题、样式、列数、行高，以及缓存的源字段名 |
 
 ### CSVReader / CSVWriter
 

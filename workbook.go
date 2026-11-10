@@ -34,6 +34,10 @@ type Workbook struct {
 	definedNameList    []definedName
 	workbookProtection *WorkbookProtection
 	date1904           bool
+	writePassword      string
+	strictOOXML        bool
+	loadedStrict       bool
+	slicerCaches       []*SlicerCache
 
 	// source is the package this workbook was loaded from, used to preserve
 	// parts the model does not edit (theme, drawings, charts, media, pivots).
@@ -154,6 +158,22 @@ func (wb *Workbook) SetDate1904(v bool) { wb.date1904 = v }
 // IsDate1904 reports whether the workbook uses the 1904 date system.
 func (wb *Workbook) IsDate1904() bool { return wb.date1904 }
 
+// SetPassword encrypts the workbook with ECMA-376 Agile encryption
+// (AES-256, SHA-512) when it is saved as xlsx/xlsm/xltx/xltm.
+// An empty password writes a normal OOXML package.
+func (wb *Workbook) SetPassword(password string) { wb.writePassword = password }
+
+// SetStrictOOXML selects strict ECMA-376 namespaces and conformance="strict"
+// when the workbook is saved. The default remains transitional OOXML.
+func (wb *Workbook) SetStrictOOXML(strict bool) { wb.strictOOXML = strict }
+
+// StrictOOXML reports whether the next save will use strict OOXML.
+func (wb *Workbook) StrictOOXML() bool { return wb.strictOOXML }
+
+// LoadedStrict reports whether the workbook was read from a strict OOXML package.
+// Saving still uses transitional OOXML unless SetStrictOOXML(true) is called.
+func (wb *Workbook) LoadedStrict() bool { return wb.loadedStrict }
+
 // AddNamedRange adds a named range to the workbook.
 func (wb *Workbook) AddNamedRange(name, reference string) {
 	wb.namedRanges[name] = reference
@@ -261,11 +281,14 @@ func (wb *Workbook) CopySheet(srcIndex int, newTitle string) (*Worksheet, error)
 	// Copy cells
 	for key, cell := range src.cells {
 		newCell := &Cell{
-			Value:   cell.Value,
-			Type:    cell.Type,
-			Formula: cell.Formula,
-			row:     cell.row,
-			col:     cell.col,
+			Value:       cell.Value,
+			Type:        cell.Type,
+			Formula:     cell.Formula,
+			row:         cell.row,
+			col:         cell.col,
+			formulaRef:  cell.formulaRef,
+			arrayAnchor: cell.arrayAnchor,
+			sheet:       dst,
 		}
 		if cell.Style != nil {
 			styleCopy := *cell.Style

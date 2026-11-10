@@ -188,15 +188,48 @@ None required. They stay in the tree as regression files for `make diffcheck`.
 
 openpyxl + POI read and round-trip: **0 defects** across r2–r10 (122 files in that run) after the round 2–5 comparison fixes.
 
+## Gap closure — encryption, modeled features, array refs, strict write
+
+### Encrypted workbooks
+
+ECMA-376 encrypted packages (OLE compound files) open with `OpenFile(path, WithPassword(pw))` and `XLSXReader.ReadPassword`. `Workbook.SetPassword` saves Agile encryption (AES-256-CBC, SHA-512, 100000 spins), the scheme Excel 2010 and later write. Standard encryption (Office 2007 AES-128 / SHA-1, 50000 spins) is read, and the same writer is covered by `encryptStandardPackage` in tests.
+
+Fixtures in `testdata/encrypted/` (password `s3cret`, synthetic cells only):
+
+| File | Produced by |
+|------|-------------|
+| `poi-agile.xlsx` | Apache POI 5.4.0 Agile |
+| `poi-standard.xlsx` | Apache POI 5.4.0 Standard |
+| `msoffcrypto-agile.xlsx` | msoffcrypto-tool 6.1.0 Agile |
+
+goexcel decrypts all three. msoffcrypto-tool and POI both decrypt a workbook goexcel saved with `SetPassword` and read `A1=encrypted-ok`. Opening an encrypted file without a password returns `ErrPasswordRequired`. A wrong password returns `ErrWrongPassword`.
+
+### Sparklines, slicers, pivot layout
+
+These are no longer pass-through only.
+
+- `Worksheet.SparklineGroups` / `SetSparklineGroups` read and rewrite `x14:sparklineGroup` (type, markers, colors, formula, sqref). `testdata/excel/r3/lo-Sparklines.xlsx` round-trips; an edit of the sqref to `Z9` and a group type to `stacked` is what openpyxl, POI, and LibreOffice Calc reopen. Untouched saves keep the original sparkline XML.
+- `Worksheet.PivotTables` exposes name, cache id, data caption, location ref, style, row/col/page fields, data fields, and cache field names. Editing name, data caption, and location on `ExcelPivotTableSample.xlsx` is visible to openpyxl (`_pivots` name `RenamedPivot`) and POI (`XSSFPivotTable` name `RenamedPivot`). LibreOffice Calc reopens the file and keeps the name.
+- `Worksheet.Slicers` and `Workbook.SlicerCaches` expose name, caption, style, column count, row height, and cache source name. Edits are written back into the slicer parts. openpyxl, POI, and LibreOffice open the rewritten package and still read the sheet cells. Creating a pivot cache or slicer cache from scratch is not implemented; existing parts are edited.
+
+### Array formulas
+
+`Worksheet.SetArrayFormula`, `ArrayFormulas`, and `FormulaAt`, plus `Cell.ArrayRef`, `IsArrayFormula`, and `ReportedFormula`, follow Excel: the package stores the expression on the anchor with `t="array"` and `ref`, and every cell in that ref reports the same formula. Member cells do not grow their own `<f>` element, so the differential harness still agrees with openpyxl (anchor only) and POI (member repetition is still the anchor check in `scripts/diffharness.py`). `SetFormulaArray` is unchanged for a single cell.
+
+### Strict OOXML
+
+`Workbook.SetStrictOOXML(true)` writes strict spreadsheet namespaces (`http://purl.oclc.org/ooxml/spreadsheetml/main`), strict office-document relationship types, strict extended properties, and `conformance="strict"`. Package content-types and package relationship namespaces stay on the transitional OPC URIs, matching Excel's own strict files such as `SampleSS.strict.xlsx`. The default save stays transitional, including when the file that was read was strict (`LoadedStrict` reports that without changing the writer). goexcel reads the strict package back. LibreOffice Calc opens it. openpyxl and POI still refuse strict packages (POI bug 57699); that is their limitation.
+
 ## Remaining known gaps
 
-- Strict OOXML is read by goexcel. openpyxl and POI refuse it (POI bug 57699). Rewritten files are transitional OOXML.
-- Encrypted workbooks (OLE compound, for example `protected_passtika.xlsx`) are not OOXML zip packages and are not opened.
-- LibreOffice recalculates pivots, localizes captions, and reports `Err:502` for some Excel errors. Conversion succeeds; those drifts are not treated as goexcel defects.
-- POI drops a shared-string index that contains trailing whitespace (`<v>2 </v>`). goexcel and openpyxl read the string.
-- Slicers, sparklines, and pivot layouts are preserved as package parts, not edited in the cell model.
-- Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells.
-- Array-formula anchors are stored on the anchor cell. POI also repeats the formula on members; openpyxl does not. Both match after the anchor check.
-## Later rounds
+These are reference-tool behavior or features that are not OOXML grid content. They are not goexcel content defects.
 
-Filled in as each round lands.
+- openpyxl and POI do not read strict OOXML (POI bug 57699). goexcel reads it and can write it when asked. LibreOffice Calc opens a strict file written by goexcel.
+- LibreOffice recalculates pivots, localizes captions, and reports `Err:502` for some Excel errors. Conversion succeeds; those drifts are not goexcel defects. LibreOffice 24.2 also aborts (`ScRangeList`) while importing `r1/cx-SampleSparklines.xlsx`. openpyxl and POI read that file with no content diff. The crash is the LibreOffice importer, including on the original package.
+- POI drops a shared-string index that contains trailing whitespace (`<v>2 </v>`). goexcel and openpyxl read the string.
+- openpyxl warns that it does not support sparkline extensions and would drop them if it saved the file. goexcel preserves and edits them.
+- msoffcrypto-tool 6.1.0's own encrypt of a package smaller than the 4096-byte mini-stream cutoff produces a compound file it cannot decrypt. goexcel pads the encrypted package onto the regular FAT so both msoffcrypto and POI decrypt it. The checked-in msoffcrypto fixture is a larger workbook that tool can round-trip.
+- Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells; that is the OOXML model.
+- Extensible encryption (`EncryptionInfo` minor version 3) and legacy RC4 encryption are not implemented. Agile and Standard AES are.
+- New pivot tables and slicer caches cannot be built from an empty workbook. Existing ones can be read, edited for the properties above, and written back.
+

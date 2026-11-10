@@ -67,6 +67,10 @@ type Worksheet struct {
 	preserved          []rawXML
 	sheetRels          []relationship
 	autoFilterRaw      string
+	sparklineGroups    []SparklineGroup
+	sparklinesEdited   bool
+	slicers            []*Slicer
+	pivots             []*PivotTable
 }
 
 // NewWorksheet creates a new worksheet with the given title.
@@ -101,9 +105,11 @@ func cellKey(row, col int) string {
 func (ws *Worksheet) GetCell(row, col int) *Cell {
 	key := cellKey(row, col)
 	if c, ok := ws.cells[key]; ok {
+		c.sheet = ws
 		return c
 	}
 	c := NewCell(row, col)
+	c.sheet = ws
 	ws.cells[key] = c
 	return c
 }

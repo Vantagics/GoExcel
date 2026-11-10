@@ -436,6 +436,8 @@ func keepPackagePart(name string) bool {
 		strings.HasPrefix(l, "xl/pivottables/"),
 		strings.HasPrefix(l, "xl/pivotcache/"),
 		strings.Contains(l, "pivot"),
+		strings.HasPrefix(l, "xl/slicers/"),
+		strings.HasPrefix(l, "xl/slicercaches/"),
 		strings.HasPrefix(l, "xl/tables/"),
 		strings.HasPrefix(l, "xl/printersettings/"),
 		strings.HasPrefix(l, "xl/threadedcomments/"),

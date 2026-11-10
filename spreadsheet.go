@@ -27,18 +27,20 @@ const (
 
 // Cell represents a single cell in a worksheet.
 type Cell struct {
-	Value      interface{}
-	Type       CellType
-	Formula    string
-	Style      *Style
-	Hyperlink  *Hyperlink
-	Comment    *Comment
-	RichText   *RichText
-	row        int
-	col        int
-	formulaRef string // array-formula ref, when the formula applies to a range
-	cachedType string // cached formula result type: n, str, b, e
-	dt         *dataTable
+	Value       interface{}
+	Type        CellType
+	Formula     string
+	Style       *Style
+	Hyperlink   *Hyperlink
+	Comment     *Comment
+	RichText    *RichText
+	row         int
+	col         int
+	formulaRef  string // array-formula ref, when this cell is the anchor
+	arrayAnchor bool   // this cell stores the array formula for formulaRef
+	sheet       *Worksheet
+	cachedType  string // cached formula result type: n, str, b, e
+	dt          *dataTable
 }
 
 // dataTable is an Excel data-table formula (What-If). It is not a normal
@@ -104,6 +106,8 @@ func (c *Cell) SetFormula(formula string) *Cell {
 	c.Formula = formula
 	c.Type = CellTypeFormula
 	c.dt = nil
+	c.arrayAnchor = false
+	c.formulaRef = ""
 	return c
 }
 
@@ -205,6 +209,10 @@ func (c *Cell) Clear() *Cell {
 	c.Hyperlink = nil
 	c.Comment = nil
 	c.RichText = nil
+	c.formulaRef = ""
+	c.arrayAnchor = false
+	c.cachedType = ""
+	c.dt = nil
 	return c
 }
 
@@ -264,9 +272,16 @@ func (c *Cell) SetNumberWithFormat(v float64, nf NumberFormat) *Cell {
 }
 
 // SetFormulaArray sets an array formula (equivalent to Ctrl+Shift+Enter in Excel).
+// The formula is stored on this cell. For a multi-cell array, use
+// Worksheet.SetArrayFormula so every cell in the range reports the formula.
 func (c *Cell) SetFormulaArray(formula string) *Cell {
-	c.Formula = "{" + formula + "}"
-	c.Type = CellTypeFormula
+	c.SetFormula("{" + formula + "}")
+	c.arrayAnchor = true
+	if c.formulaRef == "" {
+		if name, err := CellName(c.row, c.col); err == nil {
+			c.formulaRef = name
+		}
+	}
 	return c
 }
 

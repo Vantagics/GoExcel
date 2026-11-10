@@ -676,6 +676,10 @@ def main() -> int:
         defects = []
         gaps = []
         strict = is_strict_package(filename)
+        # A LibreOffice crash while importing the original workbook is that
+        # importer failing, not a goexcel content mismatch. The round-trip
+        # conversion is the same gap when the original already crashes.
+        lo_original_crash = any(i.startswith("read/libreoffice: convert failed") for i in file_issues)
         for issue in file_issues:
             if "not a valid zip file" in issue:
                 gaps.append(issue + " (encrypted or OLE package, not OOXML)")
@@ -685,6 +689,10 @@ def main() -> int:
                 gaps.append(issue + " (openpyxl does not read strict OOXML)")
             elif ("/poi:" in issue) and "value '" in issue and issue.endswith("vs ''"):
                 gaps.append(issue + " (POI dropped a shared-string index with trailing whitespace)")
+            elif issue.startswith("read/libreoffice: convert failed"):
+                gaps.append(issue + " (LibreOffice crashed importing the original workbook)")
+            elif issue.startswith("roundtrip/libreoffice: convert failed") and lo_original_crash:
+                gaps.append(issue + " (LibreOffice also crashed on the original)")
             elif "libreoffice:" in issue and "convert failed" not in issue:
                 # LibreOffice recalculates pivots, localizes labels, and uses
                 # its own error codes. Those drifts are recorded, not failures.

@@ -541,8 +541,8 @@ Formulas support arithmetic operators: `+`, `-`, `*`, `/`, as well as cell refer
 
 | Function | Description |
 |----------|-------------|
-| `OpenFile(filename string) (*Workbook, error)` | Auto-selects reader by file extension (.xlsx / .csv) |
-| `SaveFile(wb *Workbook, filename string) error` | Auto-selects writer by file extension |
+| `OpenFile(filename string, opts ...Option) (*Workbook, error)` | Auto-selects reader by file extension (.xlsx / .csv). `WithPassword` opens an ECMA-376 encrypted workbook. |
+| `SaveFile(wb *Workbook, filename string) error` | Auto-selects writer by file extension. `Workbook.SetPassword` writes Agile encryption. |
 
 ### XLSXReader / XLSXWriter
 
@@ -550,10 +550,23 @@ Formulas support arithmetic operators: `+`, `-`, `*`, `/`, as well as cell refer
 |-----------------|-------------|
 | `NewXLSXReader() *XLSXReader` | Creates an XLSX reader |
 | `(*XLSXReader) Open(filename string) (*Workbook, error)` | Reads from file |
-| `(*XLSXReader) Read(reader io.ReaderAt, size int64) (*Workbook, error)` | Reads from io.ReaderAt |
+| `(*XLSXReader) Read(reader io.ReaderAt, size int64) (*Workbook, error)` | Reads from io.ReaderAt. Encrypted packages return `ErrPasswordRequired`. |
+| `(*XLSXReader) OpenPassword / ReadPassword` | Decrypts Agile or Standard ECMA-376 encryption, then reads the package. |
+| `DecryptPackage` / `EncryptPackage` | Decrypt or Agile-encrypt a raw OOXML package. |
 | `NewXLSXWriter() *XLSXWriter` | Creates an XLSX writer |
 | `(*XLSXWriter) Save(wb *Workbook, filename string) error` | Saves to file |
-| `(*XLSXWriter) Write(wb *Workbook, writer io.Writer) error` | Writes to io.Writer |
+| `(*XLSXWriter) Write(wb *Workbook, writer io.Writer) error` | Writes to io.Writer. A workbook password emits an OLE encrypted package. `SetStrictOOXML(true)` writes strict ECMA-376 namespaces; the default stays transitional. |
+
+### Array formulas, sparklines, slicers, pivots
+
+| API | Description |
+|-----|-------------|
+| `(*Worksheet) SetArrayFormula(rangeRef, formula string) error` | Stores an array formula on the anchor. Every cell in the ref reports it. |
+| `(*Worksheet) FormulaAt(ref string) (formula, arrayRef string, err error)` | Formula Excel would show, plus the array ref when the cell is covered by one. |
+| `(*Cell) ArrayRef / IsArrayFormula / ReportedFormula` | Anchor ref and the formula bar text, including for cells that only belong to the ref. |
+| `(*Worksheet) SparklineGroups / SetSparklineGroups` | Read or replace sparkline groups (type, markers, colors, formula, cell). |
+| `(*Worksheet) PivotTables` | Pivot name, location, data caption, style, fields. `SetName`, `SetLocation`, `SetDataCaption`, `SetStyle` write those attributes back. |
+| `(*Worksheet) Slicers` / `(*Workbook) SlicerCaches` | Caption, style, column count, row height, and cache source name. |
 
 ### CSVReader / CSVWriter
 

@@ -33,8 +33,59 @@ func (r *XLSXReader) Open(filename string) (*Workbook, error) {
 	return r.Read(f, info.Size())
 }
 
+// OpenPassword reads an xlsx file, decrypting it when it is an ECMA-376
+// encrypted package. password may be empty for a normal zip package.
+func (r *XLSXReader) OpenPassword(filename, password string) (*Workbook, error) {
+	b, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("opening file: %w", err)
+	}
+	return r.ReadPassword(bytes.NewReader(b), int64(len(b)), password)
+}
+
+// ReadPassword reads an xlsx package, decrypting OLE/ECMA-376 encryption when
+// the bytes are a compound file. A normal zip package ignores password.
+func (r *XLSXReader) ReadPassword(reader io.ReaderAt, size int64, password string) (*Workbook, error) {
+	if isOLEReader(reader, size) {
+		if password == "" {
+			return nil, ErrPasswordRequired
+		}
+		buf := make([]byte, size)
+		n, err := reader.ReadAt(buf, 0)
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("reading encrypted package: %w", err)
+		}
+		if int64(n) != size {
+			return nil, fmt.Errorf("reading encrypted package: short read %d of %d", n, size)
+		}
+		plain, err := DecryptPackage(buf, password)
+		if err != nil {
+			return nil, err
+		}
+		return r.readPackage(bytes.NewReader(plain), int64(len(plain)))
+	}
+	return r.readPackage(reader, size)
+}
+
 // Read reads an XLSX from an io.ReaderAt with the given size.
+// Encrypted packages return ErrPasswordRequired; use ReadPassword.
 func (r *XLSXReader) Read(reader io.ReaderAt, size int64) (*Workbook, error) {
+	if isOLEReader(reader, size) {
+		return nil, ErrPasswordRequired
+	}
+	return r.readPackage(reader, size)
+}
+
+func isOLEReader(reader io.ReaderAt, size int64) bool {
+	if reader == nil || size < 8 {
+		return false
+	}
+	magic := make([]byte, 8)
+	n, err := reader.ReadAt(magic, 0)
+	return err == nil && n == 8 && isOLE(magic)
+}
+
+func (r *XLSXReader) readPackage(reader io.ReaderAt, size int64) (*Workbook, error) {
 	zr, err := zip.NewReader(reader, size)
 	if err != nil {
 		return nil, fmt.Errorf("opening zip: %w", err)
@@ -111,6 +162,7 @@ func (r *XLSXReader) Read(reader io.ReaderAt, size int64) (*Workbook, error) {
 			return nil, fmt.Errorf("reading sheet %q: %w", ws.title, err)
 		}
 	}
+	indexWorkbookFeatures(wb)
 	return wb, nil
 }
 
@@ -304,6 +356,9 @@ func parseFloatAttr(v string) float64 {
 
 func parseWorkbook(data []byte, wb *Workbook) error {
 	wb.extraRootAttrs = extraNamespaceDecls(firstStartTag(data, "workbook"))
+	if bytes.Contains(data, []byte(`conformance="strict"`)) || bytes.Contains(data, []byte("http://purl.oclc.org/ooxml/spreadsheetml/main")) {
+		wb.loadedStrict = true
+	}
 	data = stripBOM(data)
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	for {
@@ -334,6 +389,9 @@ func parseWorkbook(data []byte, wb *Workbook) error {
 		switch se.Name.Local {
 		case "workbookPr":
 			wb.date1904 = parseBoolAttr(attrLocal(se, "date1904"), false)
+			if bytes.Contains(data, []byte(`conformance="strict"`)) || bytes.Contains(data, []byte("http://purl.oclc.org/ooxml/spreadsheetml/main")) {
+				wb.loadedStrict = true
+			}
 			if err := skipElement(dec); err != nil {
 				return err
 			}

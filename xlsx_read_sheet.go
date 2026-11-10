@@ -622,6 +622,7 @@ func applyPendingCell(ws *Worksheet, pc *pendingCell, sst []sstItem, styles *sty
 		}
 		cell.SetFormula(formula)
 		cell.formulaRef = pc.fRef
+		cell.arrayAnchor = pc.fType == "array"
 		applyCached(cell, pc, isDate, wb)
 		return
 	}
