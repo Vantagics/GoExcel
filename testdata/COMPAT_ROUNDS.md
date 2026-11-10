@@ -306,6 +306,51 @@ SheetJS `test_files` returned HTTP 403, and the public SheetJS tree that was rea
 
 `python3 scripts/diffharness.py --roundtrip` on r12: **29 files, 0 content defects**. The same check on the full corpus (244 workbooks, including r12): **0 content defects**. `go test ./...` passes. Opening `testdata/perf/ej-huge.xlsx` reads 1,400,014 cells in about 7.7s and about 1080MB of heap.
 
+## Round 13 — pivot item filters, streaming, cell images, threaded comments
+
+### Pivot filters
+
+`PivotFilter` on `PivotBuild` selects the visible items of a field. The summary grid is computed from the rows that match.
+
+- A page field with one included item writes `pageField item="n"` and shows that label instead of `(All)`.
+- Several included items, or `Multiple: true`, set `multipleItemSelectionAllowed="1"`, hide the other items with `h="1"`, and show `(Multiple Items)`.
+- A row or column field hides excluded items with `h="1"` and drops them from `rowItems` / `colItems`.
+
+Checked on a Region/Channel/Amount/Year table (`/tmp/pivot-filter.xlsx`):
+
+- Year `2024` only: North sum 30, grand 30, South omitted. openpyxl, POI (pivot `Only2024` at `A10:B12`), and LibreOffice Calc agree. LibreOffice keeps the page caption `2024`.
+- Channel `Web` only: North 10, South 8, grand 18. Store is not a column. LibreOffice's compact refresh matches those totals.
+
+### Streaming
+
+`OpenRows` returns a `RowIterator` that reads one worksheet row at a time. Shared strings are loaded once; the cell map is not. `CreateStream` / `NewStreamWriter` write rows directly into the zip using inline strings, so memory stays on the order of one row plus the compressor.
+
+Measured in `TestStreamMemory` (peak `HeapAlloc` while the call runs):
+
+| Path | Time | Peak heap |
+| --- | --- | --- |
+| `OpenFile` of `testdata/perf/ej-huge.xlsx` (1,400,014 cells) | 9.1s | 1600MB |
+| `OpenRows` over the same file | 2.2s | 29MB |
+| `CreateStream` of 2,000,000 numeric cells (250,000 × 8) | 1.5s | 3MB |
+
+openpyxl, POI, and LibreOffice Calc open a streamed workbook. The streamed formula `SUM(B2,1)` is `4.5` after LibreOffice recalculates `3.5+1`. POI reads the 20,000-row streamed sheet through `F20000=200005`.
+
+### Cell images and threaded comments
+
+`Cell.SetImage` / `Cell.Image` read and write a rich-value local image (`vm`, `xl/metadata.xml`, `xl/richData`, and the media part). Excel's `#VALUE!` sentinel is what the cell stores. `testdata/excel/r12/rw-embed-image.xlsx` round-trips the PNG bytes.
+
+`Workbook.AddPerson`, `Worksheet.AddThreadedComment`, `ReplyToThreadedComment`, `SetThreadedCommentText`, and `SetThreadedCommentResolved` read and write the person list and the thread (`parentId`, `done`). Creating a thread also writes a legacy note, so LibreOffice and older Excel still show the text. A thread that was only loaded is not given a new note on save.
+
+### Samples
+
+`testdata/excel/r13/` adds 19 workbooks from three sources not used before:
+
+- PhpSpreadsheet (MIT): pivot, data bar, icon set, sparklines, chart sheet, shared formulas, forms and comments, defined names, a table.
+- NPOI (Apache-2.0): comments, conditional formatting, newlines in formulas, a workbook with no shared-string table, matrix formulas.
+- excelize (BSD-3): merge, overflow numeric, shared strings, calc chain, Book1.
+
+`python3 scripts/diffharness.py --roundtrip` on r13: **19 files, 0 content defects**. The same check on the full corpus (263 workbooks, including r13): **0 content defects**.
+
 ## Remaining known gaps
 
 - openpyxl and POI do not read strict OOXML (POI bug 57699). goexcel reads it and can write it when asked. LibreOffice Calc opens a strict file written by goexcel.
@@ -315,9 +360,10 @@ SheetJS `test_files` returned HTTP 403, and the public SheetJS tree that was rea
 - openpyxl warns that it does not support sparkline or slicer-list extensions and would drop them if it saved the file. goexcel preserves and writes them. LibreOffice's converter keeps a new pivot cache and drops the slicer parts on export.
 - msoffcrypto-tool 6.1.0 does not decrypt binary RC4 or RC4 CryptoAPI. It also cannot decrypt its own encrypt of a package under the 4096-byte mini-stream cutoff. goexcel pads Agile packages so both msoffcrypto and POI decrypt them.
 - Extensible encryption is an external cipher provider. It is not implemented.
-- `BuildPivotTable` page fields show every item (`(All)`). They do not hide source rows for a single selected item. LibreOffice's refresh ignores pivot `fieldGroup`, so date and numeric groups stay as the precomputed cache labels in goexcel and become the base values after a LibreOffice recalc. Average and max can disappear in LibreOffice's compact layout.
-- A cell image is preserved (`vm` plus `xl/richData`) and is not a first-class Go value. Threaded comments are preserved as package parts and are not exposed on `Cell` next to notes.
+- LibreOffice's refresh ignores pivot `fieldGroup`, so date and numeric groups stay as the precomputed cache labels in goexcel and become the base values after a LibreOffice recalc. Average and max can disappear in LibreOffice's compact layout.
+- `PivotFilter.Include` is an allow-list. A numeric field that is only a data field (not on an axis) has no discrete items to filter.
+- `Cell.Image` covers rich-value local images. Other rich-value kinds are still package parts. The streaming writer stores text inline and does not write styles or a shared-string table. `OpenRows` returns cached numbers and strings and does not apply date formats.
 - LibreOffice 24.2 reports `#NAME?` for `_xlfn.UNIQUE` and recalculates some cached formula results (the 4,000-row sheet's cached `0` becomes the computed total). Those are recalc gaps. openpyxl still refuses a workbook whose relationship points at a missing `xl/sharedStrings.xml`.
-- `testdata/perf/ej-huge.xlsx` is outside `make diffcheck`. The reader holds the sheet in memory (about 1080MB for 1.4 million cells).
+- `OpenFile` on `testdata/perf/ej-huge.xlsx` still builds the full cell map (about 1600MB peak heap). `OpenRows` reads that file in about 29MB. The file stays outside `make diffcheck`.
 - Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells. `AddSlicer` still attaches a slicer to a pivot created with `AddPivotTable` or `BuildPivotTable`.
 

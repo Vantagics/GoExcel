@@ -87,6 +87,8 @@ func (w *XLSXWriter) writePackage(zw *zip.Writer, wb *Workbook) error {
 	if wb != nil {
 		wb.applyFeatureEdits()
 		wb.layoutAuthored()
+		assignCellImages(wb)
+		ensureThreadFallbacks(wb)
 	}
 	reg := newStyleRegistry(wb)
 	sst := collectSharedStrings(wb)
@@ -167,6 +169,12 @@ func (w *XLSXWriter) writePackage(zw *zip.Writer, wb *Workbook) error {
 			if written[name] || !keepPackagePart(name) {
 				continue
 			}
+			if wb.hasCellImages() && skipRichImagePart(name) {
+				continue
+			}
+			if wb.hasThreads() && skipThreadPart(name) {
+				continue
+			}
 			// Sheet-level comment/vml parts are rewritten when this package
 			// emits its own. Skip originals that a plan replaced.
 			if replacedOriginal(plans, name) {
@@ -183,6 +191,12 @@ func (w *XLSXWriter) writePackage(zw *zip.Writer, wb *Workbook) error {
 		}
 	}
 	if err := w.writeAuthoredParts(zw, wb); err != nil {
+		return err
+	}
+	if err := w.writeCellImages(zw, wb); err != nil {
+		return err
+	}
+	if err := w.writeThreads(zw, wb); err != nil {
 		return err
 	}
 	return nil
@@ -297,7 +311,7 @@ func planSheet(wb *Workbook, ws *Worksheet, index int) sheetPlan {
 	rewriteComments := len(comments) > 0
 	for _, rel := range ws.sheetRels {
 		suffix := relTypeSuffix(rel.Type)
-		if suffix == "hyperlink" {
+		if suffix == "hyperlink" || (len(ws.threads) > 0 && suffix == "threadedComment") {
 			continue
 		}
 		if rewriteComments && (suffix == "comments" || suffix == "vmlDrawing") {
@@ -375,6 +389,14 @@ func planSheet(wb *Workbook, ws *Worksheet, index int) sheetPlan {
 			Target: "../" + strings.TrimPrefix(s.author.slicerPart, "xl/"),
 		})
 	}
+	if len(ws.threads) > 0 {
+		id := nextRelID(used)
+		rels = append(rels, relationship{
+			ID:     id,
+			Type:   "http://schemas.microsoft.com/office/2017/10/relationships/threadedComment",
+			Target: fmt.Sprintf("../threadedComments/threadedComment%d.xml", index+1),
+		})
+	}
 	if len(rels) > 0 {
 		plan.relsXML = relationshipsXML(rels)
 	}
@@ -395,6 +417,14 @@ func (w *XLSXWriter) writeContentTypes(zw *zip.Writer, wb *Workbook, plans []she
 	for ext, ct := range original.defaults {
 		if _, ok := defaults[ext]; !ok {
 			defaults[ext] = ct
+		}
+	}
+	if wb != nil && wb.hasCellImages() {
+		if _, ok := defaults["png"]; !ok {
+			defaults["png"] = "image/png"
+		}
+		if _, ok := defaults["jpeg"]; !ok {
+			defaults["jpeg"] = "image/jpeg"
 		}
 	}
 	// Stable order: rels, xml, then the rest.
@@ -542,6 +572,15 @@ func (w *XLSXWriter) writeWorkbookRels(zw *zip.Writer, wb *Workbook, plans []she
 		case "worksheet", "chartsheet", "styles", "sharedStrings", "calcChain":
 			continue
 		}
+		if wb.hasCellImages() {
+			switch suffix {
+			case "sheetMetadata", "richValueRel", "rdRichValue", "rdRichValueStructure", "rdRichValueTypes":
+				continue
+			}
+		}
+		if wb.hasThreads() && suffix == "person" {
+			continue
+		}
 		if rel.ID == "" {
 			continue
 		}
@@ -587,6 +626,16 @@ func (w *XLSXWriter) writeWorkbookRels(zw *zip.Writer, wb *Workbook, plans []she
 				fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2007/relationships/slicerCache" Target="%s"/>`, id, strings.TrimPrefix(s.author.cachePart, "xl/"))
 			}
 		}
+	}
+	if wb != nil && wb.hasCellImages() {
+		fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sheetMetadata" Target="metadata.xml"/>`, nextRelID(used))
+		fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2022/10/relationships/richValueRel" Target="richData/richValueRel.xml"/>`, nextRelID(used))
+		fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2017/06/relationships/rdRichValue" Target="richData/rdrichvalue.xml"/>`, nextRelID(used))
+		fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2017/06/relationships/rdRichValueStructure" Target="richData/rdrichvaluestructure.xml"/>`, nextRelID(used))
+		fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2017/06/relationships/rdRichValueTypes" Target="richData/rdRichValueTypes.xml"/>`, nextRelID(used))
+	}
+	if wb != nil && wb.hasThreads() {
+		fmt.Fprintf(&b, `<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2017/10/relationships/person" Target="persons/person.xml"/>`, nextRelID(used))
 	}
 	for _, rel := range kept {
 		mode := ""

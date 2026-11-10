@@ -182,6 +182,8 @@ func indexWorkbookFeatures(wb *Workbook) {
 		ws.pivots = findPivots(wb, ws, caches)
 	}
 	wb.slicerCaches = findSlicerCaches(wb)
+	readPersons(wb, wb.source)
+	indexRichImages(wb)
 }
 
 func preservedNamed(nodes []rawXML, name string) string {

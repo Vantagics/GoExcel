@@ -252,6 +252,7 @@ func readWorksheet(ws *Worksheet, data []byte, pkg *ooxmlPackage, sst []sstItem,
 		applyPendingCell(ws, &pending[i], sst, styles, wb)
 	}
 	readComments(ws, pkg)
+	readThreadedComments(ws, pkg)
 	return nil
 }
 

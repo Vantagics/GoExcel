@@ -30,6 +30,18 @@ type PivotGrouping struct {
 	Interval float64
 }
 
+// PivotFilter chooses which items of a field stay in the summary.
+// Include lists the visible item labels. On a page field, one included item
+// is a single selection (pageField item="n"). Multiple is true, or more than
+// one included item, sets multipleItemSelectionAllowed and hides the rest.
+// On a row or column field, items not listed are written with h="1" and left
+// out of the grid.
+type PivotFilter struct {
+	Field    string
+	Include  []string
+	Multiple bool
+}
+
 // PivotBuild describes a pivot table. Nil grand-total and subtotal pointers
 // mean Excel's defaults (all shown).
 type PivotBuild struct {
@@ -41,9 +53,17 @@ type PivotBuild struct {
 	PageFields        []string
 	Values            []PivotValueField
 	Groupings         []PivotGrouping
+	Filters           []PivotFilter
 	RowGrandTotals    *bool
 	ColumnGrandTotals *bool
 	Subtotals         *bool
+}
+
+type pivotSelection struct {
+	include map[string]bool
+	single  bool
+	multi   bool
+	onAxis  bool
 }
 
 type pvCell struct {
@@ -218,7 +238,15 @@ func (ws *Worksheet) BuildPivotTable(b PivotBuild) (*PivotTable, error) {
 	showRow := flagOr(b.RowGrandTotals, true)
 	showCol := flagOr(b.ColumnGrandTotals, true)
 	showSub := flagOr(b.Subtotals, true)
-	grid := layoutPivot(cache, records, rowAxis, colAxis, values, showRow, showCol, showSub)
+	selections, err := resolveSelections(cache, rowAxis, colAxis, pageAxis, b.Filters)
+	if err != nil {
+		return nil, err
+	}
+	view := records
+	if len(selections) > 0 {
+		view = filterPivotRecords(cache, records, selections)
+	}
+	grid := layoutPivot(cache, view, rowAxis, colAxis, values, showRow, showCol, showSub)
 	names := make([]string, len(values))
 	for i, v := range values {
 		names[i] = v.name
@@ -241,6 +269,7 @@ func (ws *Worksheet) BuildPivotTable(b PivotBuild) (*PivotTable, error) {
 		showColGrand: showCol,
 		showSub:      showSub,
 		grid:         grid,
+		selections:   selections,
 	}
 	author.textCols = make([]bool, len(headers))
 	for i := range author.textCols {
@@ -279,7 +308,7 @@ func (ws *Worksheet) BuildPivotTable(b PivotBuild) (*PivotTable, error) {
 			label, _ := CellName(top+i, destRef.ColumnIdx)
 			all, _ := CellName(top+i, destRef.ColumnIdx+1)
 			ws.SetCellValue(label, cache[idx].name)
-			ws.SetCellValue(all, "(All)")
+			ws.SetCellValue(all, pageCaption(cache[idx], selections[idx]))
 		}
 	}
 	writePivotCells(ws, destRef, grid)
@@ -504,9 +533,15 @@ func groupingFor(gs []PivotGrouping, field string) *PivotGrouping {
 
 func buildCacheFields(headers []string, rows [][]pvCell, b PivotBuild) ([]pvCacheField, error) {
 	fields := make([]pvCacheField, len(headers))
+	onAxis := map[string]bool{}
+	for _, name := range append(append(append([]string{}, b.RowFields...), b.ColumnFields...), b.PageFields...) {
+		onAxis[name] = true
+	}
 	for i, h := range headers {
 		f := pvCacheField{name: h, srcCol: i, base: -1, par: -1}
-		if columnNumeric(rows, i) && !columnDates(rows, i) {
+		// Axis fields keep one item per distinct value so filters and page
+		// selections can address them. A numeric data field stays continuous.
+		if columnNumeric(rows, i) && !columnDates(rows, i) && !onAxis[h] {
 			f.textLike = false
 			f.numMin, f.numMax = math.Inf(1), math.Inf(-1)
 			f.allInt = true
@@ -815,6 +850,77 @@ func sortTree(n *treeNode) {
 	for _, k := range n.kids {
 		sortTree(k)
 	}
+}
+
+func resolveSelections(cache []pvCacheField, rowAxis, colAxis, pageAxis []int, filters []PivotFilter) (map[int]pivotSelection, error) {
+	if len(filters) == 0 {
+		return nil, nil
+	}
+	byName := map[string]int{}
+	for i, f := range cache {
+		byName[f.name] = i
+	}
+	out := map[int]pivotSelection{}
+	for _, f := range filters {
+		idx, ok := byName[f.Field]
+		if !ok {
+			return nil, fmt.Errorf("pivot filter field %q is not in the cache", f.Field)
+		}
+		if len(f.Include) == 0 {
+			return nil, fmt.Errorf("pivot filter %q needs at least one item", f.Field)
+		}
+		inc := map[string]bool{}
+		for _, item := range f.Include {
+			found := false
+			for _, have := range cache[idx].items {
+				if have == item {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("pivot filter %q has no item %q", f.Field, item)
+			}
+			inc[item] = true
+		}
+		page := containsInt(pageAxis, idx)
+		onAxis := page || containsInt(rowAxis, idx) || containsInt(colAxis, idx)
+		single := page && len(inc) == 1 && !f.Multiple
+		multi := page && (f.Multiple || len(inc) > 1)
+		out[idx] = pivotSelection{include: inc, single: single, multi: multi, onAxis: onAxis}
+	}
+	return out, nil
+}
+
+func filterPivotRecords(fields []pvCacheField, rows [][]pvCell, sel map[int]pivotSelection) [][]pvCell {
+	out := make([][]pvCell, 0, len(rows))
+	for _, row := range rows {
+		keep := true
+		for idx, s := range sel {
+			if !s.include[cellLabel(fields, idx, row)] {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func pageCaption(f pvCacheField, sel pivotSelection) string {
+	if sel.single {
+		for _, item := range f.items {
+			if sel.include[item] {
+				return item
+			}
+		}
+	}
+	if sel.multi {
+		return "(Multiple Items)"
+	}
+	return "(All)"
 }
 
 func layoutPivot(fields []pvCacheField, rows [][]pvCell, rowAxis, colAxis []int, values []pvValue, showRow, showCol, showSub bool) pivotGrid {
@@ -1182,6 +1288,10 @@ func (a *pivotAuthor) renderPivot(p *PivotTable) (def, rec, table string) {
 			tb.WriteString(` dataField="1"`)
 		}
 		tb.WriteString(` showAll="0"`)
+		sel := a.selections[i]
+		if sel.multi {
+			tb.WriteString(` multipleItemSelectionAllowed="1"`)
+		}
 		if axis != "" && !a.showSub {
 			tb.WriteString(` defaultSubtotal="0"`)
 		}
@@ -1189,15 +1299,26 @@ func (a *pivotAuthor) renderPivot(p *PivotTable) (def, rec, table string) {
 			tb.WriteString(`/>`)
 			continue
 		}
+		hideExcluded := sel.include != nil && !sel.single
 		fmt.Fprintf(&tb, `><items count="%d">`, len(f.items)+1)
-		for n := range f.items {
+		anyHidden := false
+		for n, label := range f.items {
+			h := ""
+			if hideExcluded && !sel.include[label] {
+				h = ` h="1"`
+				anyHidden = true
+			}
 			if n == 0 {
-				tb.WriteString(`<item x="0"/>`)
+				fmt.Fprintf(&tb, `<item x="0"%s/>`, h)
 			} else {
-				fmt.Fprintf(&tb, `<item x="%d"/>`, n)
+				fmt.Fprintf(&tb, `<item x="%d"%s/>`, n, h)
 			}
 		}
-		tb.WriteString(`<item t="default"/></items></pivotField>`)
+		defH := ""
+		if anyHidden {
+			defH = ` h="1"`
+		}
+		fmt.Fprintf(&tb, `<item t="default"%s/></items></pivotField>`, defH)
 	}
 	tb.WriteString(`</pivotFields>`)
 	if len(a.rowAxis) > 0 {
@@ -1269,7 +1390,16 @@ func (a *pivotAuthor) renderPivot(p *PivotTable) (def, rec, table string) {
 	if len(a.pageAxis) > 0 {
 		fmt.Fprintf(&tb, `<pageFields count="%d">`, len(a.pageAxis))
 		for _, idx := range a.pageAxis {
-			fmt.Fprintf(&tb, `<pageField fld="%d" hier="-1"/>`, idx)
+			itemAttr := ""
+			if sel := a.selections[idx]; sel.single {
+				for n, label := range a.cache[idx].items {
+					if sel.include[label] {
+						itemAttr = fmt.Sprintf(` item="%d"`, n)
+						break
+					}
+				}
+			}
+			fmt.Fprintf(&tb, `<pageField fld="%d"%s hier="-1"/>`, idx, itemAttr)
 		}
 		tb.WriteString(`</pageFields>`)
 	}

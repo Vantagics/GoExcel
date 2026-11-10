@@ -213,6 +213,114 @@ func TestFullPivotBuilder(t *testing.T) {
 	}
 }
 
+func TestPivotItemFilters(t *testing.T) {
+	wb := New()
+	ws := wb.GetActiveSheet()
+	headers := []string{"Region", "Product", "Channel", "Amount", "Qty", "Year", "When"}
+	for i, h := range headers {
+		ws.SetCellValue(cellAt(0, i), h)
+	}
+	type rec struct {
+		region, product, channel string
+		amount, qty, year        float64
+	}
+	rows := []rec{
+		{"North", "Widget", "Web", 10, 2, 2024},
+		{"North", "Gadget", "Store", 20, 1, 2024},
+		{"North", "Widget", "Store", 5, 3, 2024},
+		{"South", "Widget", "Web", 8, 4, 2023},
+		{"South", "Gadget", "Web", 12, 2, 2023},
+	}
+	for i, r := range rows {
+		ws.SetCellValue(cellAt(i+1, 0), r.region)
+		ws.SetCellValue(cellAt(i+1, 1), r.product)
+		ws.SetCellValue(cellAt(i+1, 2), r.channel)
+		ws.SetCellValue(cellAt(i+1, 3), r.amount)
+		ws.SetCellValue(cellAt(i+1, 4), r.qty)
+		ws.SetCellValue(cellAt(i+1, 5), r.year)
+	}
+	if _, err := ws.BuildPivotTable(PivotBuild{
+		Name: "Only2024", Source: "A1:F6", Dest: "A10",
+		RowFields:  []string{"Region"},
+		PageFields: []string{"Year"},
+		Values:     []PivotValueField{{Field: "Amount", Function: "sum"}},
+		Filters:    []PivotFilter{{Field: "Year", Include: []string{"2024"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := ws.GetCellValue("B8"); v != "2024" {
+		t.Fatalf("single page item = %#v", v)
+	}
+	if v, _ := ws.GetCellValue("B12"); v != 35.0 {
+		t.Fatalf("2024 total = %#v", v)
+	}
+	if v, _ := ws.GetCellValue("A11"); v != "North" {
+		t.Fatalf("visible region = %#v", v)
+	}
+	if c, _ := ws.GetCellByName("A13"); c != nil && c.Value != nil && c.Value != "Grand Total" && fmtRegion(c.Value) == "South" {
+		t.Fatalf("South should be filtered out, A13=%#v", c.Value)
+	}
+	if _, err := ws.BuildPivotTable(PivotBuild{
+		Name: "BothYears", Source: "A1:F6", Dest: "A20",
+		RowFields:  []string{"Region"},
+		PageFields: []string{"Year"},
+		Values:     []PivotValueField{{Field: "Amount", Function: "sum"}},
+		Filters:    []PivotFilter{{Field: "Year", Include: []string{"2023", "2024"}, Multiple: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := ws.GetCellValue("B18"); v != "(Multiple Items)" {
+		t.Fatalf("multi page caption = %#v", v)
+	}
+	if _, err := ws.BuildPivotTable(PivotBuild{
+		Name: "WebOnly", Source: "A1:F6", Dest: "A30",
+		RowFields:    []string{"Region"},
+		ColumnFields: []string{"Channel"},
+		Values:       []PivotValueField{{Field: "Amount", Function: "sum"}},
+		Filters:      []PivotFilter{{Field: "Channel", Include: []string{"Web"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := ws.GetCellValue("B30"); v != "Web" {
+		t.Fatalf("visible channel = %#v", v)
+	}
+	if v, _ := ws.GetCellValue("C30"); v == "Store" {
+		t.Fatal("hidden channel Store is still a column")
+	}
+	if v, _ := ws.GetCellValue("B31"); v != 10.0 {
+		t.Fatalf("North web = %#v", v)
+	}
+	if v, _ := ws.GetCellValue("B33"); v != 30.0 {
+		t.Fatalf("web grand = %#v", v)
+	}
+	var buf bytes.Buffer
+	if err := NewXLSXWriter().Write(wb, &buf); err != nil {
+		t.Fatal(err)
+	}
+	files := zipFiles(t, buf.Bytes())
+	var tables []string
+	for name, b := range files {
+		if strings.Contains(name, "pivotTable") && strings.HasSuffix(name, ".xml") {
+			tables = append(tables, string(b))
+		}
+	}
+	joined := strings.Join(tables, "\n")
+	if !strings.Contains(joined, `item="0"`) && !strings.Contains(joined, `item="1"`) {
+		t.Fatal("single page filter did not write a pageField item index")
+	}
+	if !strings.Contains(joined, `multipleItemSelectionAllowed="1"`) {
+		t.Fatal("multiple page filter missing multipleItemSelectionAllowed")
+	}
+	if !strings.Contains(joined, `h="1"`) {
+		t.Fatal("hidden column item missing h=\"1\"")
+	}
+}
+
+func fmtRegion(v interface{}) string {
+	s, _ := v.(string)
+	return s
+}
+
 func cellAt(row, col int) string {
 	s, _ := CellName(row, col)
 	return s

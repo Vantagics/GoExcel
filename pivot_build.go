@@ -32,6 +32,7 @@ type pivotAuthor struct {
 	showColGrand bool
 	showSub      bool
 	grid         pivotGrid
+	selections   map[int]pivotSelection
 
 	cacheID    int
 	cachePart  string
@@ -238,6 +239,24 @@ func (wb *Workbook) authoredContentTypes() []contentOverride {
 				contentOverride{"/" + sl.author.slicerPart, "application/vnd.ms-excel.slicer+xml"},
 				contentOverride{"/" + sl.author.cachePart, "application/vnd.ms-excel.slicerCache+xml"},
 			)
+		}
+	}
+	if wb.hasCellImages() {
+		out = append(out,
+			contentOverride{"/xl/metadata.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml"},
+			contentOverride{"/xl/richData/rdrichvalue.xml", "application/vnd.ms-excel.rdrichvalue+xml"},
+			contentOverride{"/xl/richData/rdrichvaluestructure.xml", "application/vnd.ms-excel.rdrichvaluestructure+xml"},
+			contentOverride{"/xl/richData/rdRichValueTypes.xml", "application/vnd.ms-excel.rdrichvaluetypes+xml"},
+			contentOverride{"/xl/richData/richValueRel.xml", "application/vnd.ms-excel.richvaluerel+xml"},
+		)
+	}
+	if wb.hasThreads() {
+		out = append(out, contentOverride{"/xl/persons/person.xml", "application/vnd.ms-excel.person+xml"})
+		for i, ws := range wb.worksheets {
+			if len(ws.threads) == 0 {
+				continue
+			}
+			out = append(out, contentOverride{"/" + threadPartName(i), "application/vnd.ms-excel.threadedcomments+xml"})
 		}
 	}
 	return out

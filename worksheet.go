@@ -71,6 +71,7 @@ type Worksheet struct {
 	sparklinesEdited   bool
 	slicers            []*Slicer
 	pivots             []*PivotTable
+	threads            []ThreadedComment
 }
 
 // NewWorksheet creates a new worksheet with the given title.

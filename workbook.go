@@ -47,6 +47,8 @@ type Workbook struct {
 	styleExtras    styleExtras
 	workbookRels   []relationship
 	packageRels    []relationship
+	persons        []Person
+	nextID         int
 }
 
 // New creates a new workbook with a single default worksheet.

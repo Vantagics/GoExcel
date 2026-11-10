@@ -43,6 +43,8 @@ type Cell struct {
 	dt          *dataTable
 	cellMeta    string // cm attribute: cell metadata index (dynamic arrays)
 	valueMeta   string // vm attribute: value metadata index (rich data)
+	image       *CellImage
+	threadNote  bool
 }
 
 // dataTable is an Excel data-table formula (What-If). It is not a normal
@@ -68,6 +70,7 @@ func NewCell(row, col int) *Cell {
 func (c *Cell) SetValue(v interface{}) *Cell {
 	c.cellMeta = ""
 	c.valueMeta = ""
+	c.image = nil
 	if v == nil {
 		c.Value = nil
 		c.Type = CellTypeEmpty
@@ -114,6 +117,7 @@ func (c *Cell) SetFormula(formula string) *Cell {
 	c.formulaRef = ""
 	c.cellMeta = ""
 	c.valueMeta = ""
+	c.image = nil
 	return c
 }
 
@@ -193,6 +197,7 @@ func (c *Cell) SetHyperlink(h *Hyperlink) *Cell {
 // SetComment sets a comment on the cell.
 func (c *Cell) SetComment(comment *Comment) *Cell {
 	c.Comment = comment
+	c.threadNote = false
 	return c
 }
 
@@ -221,6 +226,7 @@ func (c *Cell) Clear() *Cell {
 	c.dt = nil
 	c.cellMeta = ""
 	c.valueMeta = ""
+	c.image = nil
 	return c
 }
 
