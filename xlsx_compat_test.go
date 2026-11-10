@@ -249,8 +249,13 @@ func TestXLSXIllegalXMLCharacters(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, _ := got.GetActiveSheet().GetCellValue("A1")
-	if v != "abc\n d" {
-		t.Errorf("sanitized value = %#v", v)
+	if v != "a\x01b\x00c\n d" {
+		t.Errorf("control characters = %#v", v)
+	}
+	files := zipFiles(t, buf.Bytes())
+	sst := string(files["xl/sharedStrings.xml"])
+	if !strings.Contains(sst, "_x0001_") || !strings.Contains(sst, "_x0000_") {
+		t.Errorf("shared string did not encode illegal characters: %s", sst)
 	}
 }
 
@@ -490,7 +495,7 @@ func assertPackagePartsPreserved(t *testing.T, originalPath string, written []by
 	}
 	for _, f := range orig.File {
 		name := strings.ToLower(f.Name)
-		if strings.HasPrefix(name, "xl/charts/") || strings.HasPrefix(name, "xl/media/") || strings.HasPrefix(name, "xl/theme/") || strings.HasPrefix(name, "xl/tables/") || strings.HasPrefix(name, "xl/pivot") || strings.HasPrefix(name, "xl/drawings/drawing") {
+		if strings.HasPrefix(name, "xl/charts/") || strings.HasPrefix(name, "xl/media/") || strings.HasPrefix(name, "xl/theme/") || strings.HasPrefix(name, "xl/tables/") || strings.HasPrefix(name, "xl/pivot") || strings.HasPrefix(name, "xl/drawings/drawing") || name == "xl/metadata.xml" || strings.HasPrefix(name, "xl/richdata/") || strings.HasPrefix(name, "xl/threadedcomments/") || strings.HasPrefix(name, "xl/persons/") || strings.HasPrefix(name, "customxml/") || strings.HasPrefix(name, "xl/customxml/") {
 			if !have[name] {
 				t.Errorf("round-trip dropped package part %s", f.Name)
 			}

@@ -107,7 +107,7 @@ func (w *XLSXWriter) writePackage(zw *zip.Writer, wb *Workbook) error {
 		return err
 	}
 	written["[Content_Types].xml"] = true
-	if err := w.writeRootRels(zw); err != nil {
+	if err := w.writeRootRels(zw, wb); err != nil {
 		return err
 	}
 	written["_rels/.rels"] = true
@@ -500,14 +500,37 @@ func pathExt(name string) string {
 	return ""
 }
 
-func (w *XLSXWriter) writeRootRels(zw *zip.Writer) error {
-	rels := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n"
-	rels += `<Relationships xmlns="` + pkgRelNS + `">`
-	rels += `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>`
-	rels += `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>`
-	rels += `<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>`
-	rels += `</Relationships>`
-	return writeZip(zw, "_rels/.rels", rels)
+func (w *XLSXWriter) writeRootRels(zw *zip.Writer, wb *Workbook) error {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
+	b.WriteString(`<Relationships xmlns="` + pkgRelNS + `">`)
+	b.WriteString(`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>`)
+	b.WriteString(`<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>`)
+	b.WriteString(`<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>`)
+	used := map[string]bool{"rId1": true, "rId2": true, "rId3": true}
+	if wb != nil {
+		for _, rel := range wb.packageRels {
+			switch relTypeSuffix(rel.Type) {
+			case "officeDocument", "core-properties", "extended-properties":
+				continue
+			}
+			if rel.ID == "" || rel.Type == "" || rel.Target == "" {
+				continue
+			}
+			id := rel.ID
+			if used[id] {
+				id = nextRelID(used)
+			}
+			used[id] = true
+			mode := ""
+			if strings.EqualFold(rel.TargetMode, "External") {
+				mode = ` TargetMode="External"`
+			}
+			fmt.Fprintf(&b, `<Relationship Id="%s" Type="%s" Target="%s"%s/>`, xmlText(id), xmlText(rel.Type), xmlText(rel.Target), mode)
+		}
+	}
+	b.WriteString(`</Relationships>`)
+	return writeZip(zw, "_rels/.rels", b.String())
 }
 
 func (w *XLSXWriter) writeWorkbookRels(zw *zip.Writer, wb *Workbook, plans []sheetPlan) error {
@@ -819,9 +842,9 @@ func (w *XLSXWriter) writeSharedStringsXML(zw *zip.Writer, ss *sstTable) error {
 	fmt.Fprintf(&b, `<sst xmlns="%s" count="%d" uniqueCount="%d">`, spreadsheetNS, count, len(ss.strings))
 	for _, s := range ss.strings {
 		if needsPreserveSpace(s) {
-			fmt.Fprintf(&b, `<si><t xml:space="preserve">%s</t></si>`, xmlText(s))
+			fmt.Fprintf(&b, `<si><t xml:space="preserve">%s</t></si>`, xmlCellText(s))
 		} else {
-			fmt.Fprintf(&b, `<si><t>%s</t></si>`, xmlText(s))
+			fmt.Fprintf(&b, `<si><t>%s</t></si>`, xmlCellText(s))
 		}
 	}
 	b.WriteString(`</sst>`)
@@ -1037,7 +1060,7 @@ func normalizeCols(ws *Worksheet) []colSpan {
 func cellsToWrite(ws *Worksheet) []*Cell {
 	cells := make([]*Cell, 0)
 	for _, c := range ws.cells {
-		if c.Type != CellTypeEmpty || c.Value != nil || c.Formula != "" || c.Style != nil || c.Hyperlink != nil || c.Comment != nil || (c.RichText != nil && len(c.RichText.Runs) > 0) {
+		if c.Type != CellTypeEmpty || c.Value != nil || c.Formula != "" || c.Style != nil || c.Hyperlink != nil || c.Comment != nil || c.cellMeta != "" || c.valueMeta != "" || (c.RichText != nil && len(c.RichText.Runs) > 0) {
 			cells = append(cells, c)
 		}
 	}
@@ -1107,6 +1130,12 @@ func writeCell(b *strings.Builder, wb *Workbook, c *Cell, sst *sstTable, reg *st
 	if styleID > 0 {
 		fmt.Fprintf(b, ` s="%d"`, styleID)
 	}
+	if c.cellMeta != "" {
+		fmt.Fprintf(b, ` cm="%s"`, xmlText(c.cellMeta))
+	}
+	if c.valueMeta != "" {
+		fmt.Fprintf(b, ` vm="%s"`, xmlText(c.valueMeta))
+	}
 
 	if c.RichText != nil && len(c.RichText.Runs) > 0 {
 		b.WriteString(` t="inlineStr"><is>`)
@@ -1116,9 +1145,9 @@ func writeCell(b *strings.Builder, wb *Workbook, c *Cell, sst *sstTable, reg *st
 				b.WriteString(richRunProps(run.Font))
 			}
 			if needsPreserveSpace(run.Text) {
-				fmt.Fprintf(b, `<t xml:space="preserve">%s</t>`, xmlText(run.Text))
+				fmt.Fprintf(b, `<t xml:space="preserve">%s</t>`, xmlCellText(run.Text))
 			} else {
-				fmt.Fprintf(b, `<t>%s</t>`, xmlText(run.Text))
+				fmt.Fprintf(b, `<t>%s</t>`, xmlCellText(run.Text))
 			}
 			b.WriteString(`</r>`)
 		}
@@ -1247,7 +1276,7 @@ func writeCachedValue(b *strings.Builder, wb *Workbook, c *Cell) {
 		fmt.Fprintf(b, `<v>%s</v>`, formatNumber(wb.serialFromTime(v)))
 	case string:
 		if v != "" {
-			fmt.Fprintf(b, `<v>%s</v>`, xmlText(v))
+			fmt.Fprintf(b, `<v>%s</v>`, xmlCellText(v))
 		}
 	}
 }
@@ -1696,15 +1725,15 @@ func commentsXML(comments []commentRef) string {
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
 	b.WriteString(`<comments xmlns="` + spreadsheetNS + `"><authors>`)
 	for _, a := range authors {
-		fmt.Fprintf(&b, `<author>%s</author>`, xmlText(a))
+		fmt.Fprintf(&b, `<author>%s</author>`, xmlCellText(a))
 	}
 	b.WriteString(`</authors><commentList>`)
 	for _, c := range comments {
 		fmt.Fprintf(&b, `<comment ref="%s" authorId="%d" shapeId="%d"><text>`, c.ref, index[c.author], c.shapeID)
 		if c.author != "" {
-			fmt.Fprintf(&b, `<r><rPr><b/><sz val="9"/><color indexed="81"/><rFont val="Tahoma"/></rPr><t>%s:</t></r>`, xmlText(c.author))
+			fmt.Fprintf(&b, `<r><rPr><b/><sz val="9"/><color indexed="81"/><rFont val="Tahoma"/></rPr><t>%s:</t></r>`, xmlCellText(c.author))
 		}
-		fmt.Fprintf(&b, `<r><rPr><sz val="9"/><color indexed="81"/><rFont val="Tahoma"/></rPr><t xml:space="preserve">%s</t></r>`, xmlText("\n"+c.text))
+		fmt.Fprintf(&b, `<r><rPr><sz val="9"/><color indexed="81"/><rFont val="Tahoma"/></rPr><t xml:space="preserve">%s</t></r>`, xmlCellText("\n"+c.text))
 		b.WriteString(`</text></comment>`)
 	}
 	b.WriteString(`</commentList></comments>`)

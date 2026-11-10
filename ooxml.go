@@ -199,6 +199,90 @@ func isLegalXMLRune(r rune) bool {
 	return r == 0x9 || r == 0xA || r == 0xD || (r >= 0x20 && r <= 0xD7FF) || (r >= 0xE000 && r <= 0xFFFD) || (r >= 0x10000 && r <= 0x10FFFF)
 }
 
+// isOOXMLEscape reports whether s is an Excel `_xHHHH_` escape (7 bytes).
+func isOOXMLEscape(s string) bool {
+	if len(s) != 7 || s[0] != '_' || s[1] != 'x' || s[6] != '_' {
+		return false
+	}
+	for i := 2; i < 6; i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// unescapeOOXMLText decodes Excel's `_xHHHH_` escapes. `_x005F_x000D_` is the
+// literal text `_x000D_`; `_x000D_` is a carriage return. A non-matching
+// string is returned unchanged.
+func unescapeOOXMLText(s string) string {
+	if !strings.Contains(s, "_x") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '_' && i+7 <= len(s) && isOOXMLEscape(s[i:i+7]) {
+			n, err := strconv.ParseUint(s[i+2:i+6], 16, 32)
+			if err == nil && n <= 0x10FFFF {
+				b.WriteRune(rune(n))
+				i += 7
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// escapeOOXMLText writes the inverse of unescapeOOXMLText. A literal
+// `_xHHHH_` is stored as `_x005F_xHHHH_`, and characters XML 1.0 forbids
+// are stored as `_xHHHH_` so they survive the package.
+func escapeOOXMLText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '_' && i+7 <= len(s) && isOOXMLEscape(s[i:i+7]) {
+			// Replace only the leading underscore. `_x000D_` is stored as
+			// `_x005F_x000D_`, which decodes back to the literal `_x000D_`.
+			b.WriteString("_x005F_")
+			b.WriteString(s[i+1 : i+7])
+			i += 7
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		if !isLegalXMLRune(r) {
+			hex := strconv.FormatUint(uint64(r), 16)
+			for len(hex) < 4 {
+				hex = "0" + hex
+			}
+			b.WriteString("_x")
+			b.WriteString(strings.ToUpper(hex))
+			b.WriteByte('_')
+			i += size
+			continue
+		}
+		b.WriteRune(r)
+		i += size
+	}
+	return b.String()
+}
+
+// xmlCellText escapes cell text the way Excel writes shared strings, then
+// XML-escapes the result.
+func xmlCellText(s string) string {
+	if strings.Contains(s, "_x") || hasIllegalXML(s) {
+		s = escapeOOXMLText(s)
+	}
+	return xmlText(s)
+}
+
 func needsPreserveSpace(s string) bool {
 	if s == "" {
 		return false
@@ -448,6 +532,8 @@ func keepPackagePart(name string) bool {
 		strings.HasPrefix(l, "xl/querytables/"),
 		strings.HasPrefix(l, "xl/customxml/"),
 		strings.HasPrefix(l, "customxml/"),
+		l == "xl/metadata.xml",
+		strings.HasPrefix(l, "xl/richdata/"),
 		l == "xl/vbaproject.bin",
 		l == "xl/volatiledependencies.xml",
 		l == "xl/connections.xml",

@@ -41,6 +41,8 @@ type Cell struct {
 	sheet       *Worksheet
 	cachedType  string // cached formula result type: n, str, b, e
 	dt          *dataTable
+	cellMeta    string // cm attribute: cell metadata index (dynamic arrays)
+	valueMeta   string // vm attribute: value metadata index (rich data)
 }
 
 // dataTable is an Excel data-table formula (What-If). It is not a normal
@@ -64,6 +66,8 @@ func NewCell(row, col int) *Cell {
 
 // SetValue sets the cell value and auto-detects the type.
 func (c *Cell) SetValue(v interface{}) *Cell {
+	c.cellMeta = ""
+	c.valueMeta = ""
 	if v == nil {
 		c.Value = nil
 		c.Type = CellTypeEmpty
@@ -108,6 +112,8 @@ func (c *Cell) SetFormula(formula string) *Cell {
 	c.dt = nil
 	c.arrayAnchor = false
 	c.formulaRef = ""
+	c.cellMeta = ""
+	c.valueMeta = ""
 	return c
 }
 
@@ -213,6 +219,8 @@ func (c *Cell) Clear() *Cell {
 	c.arrayAnchor = false
 	c.cachedType = ""
 	c.dt = nil
+	c.cellMeta = ""
+	c.valueMeta = ""
 	return c
 }
 

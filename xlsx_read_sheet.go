@@ -25,6 +25,7 @@ type pendingCell struct {
 	inline     string
 	inlineRich *RichText
 	hasInline  bool
+	cm, vm     string
 }
 
 type sharedMaster struct {
@@ -515,7 +516,7 @@ func parseRow(dec *xml.Decoder, row int, theme []string) ([]pendingCell, error) 
 }
 
 func parseCell(dec *xml.Decoder, start xml.StartElement, row, col int, theme []string) (pendingCell, error) {
-	pc := pendingCell{row: row, col: col, t: attrLocal(start, "t"), s: attrLocal(start, "s")}
+	pc := pendingCell{row: row, col: col, t: attrLocal(start, "t"), s: attrLocal(start, "s"), cm: attrLocal(start, "cm"), vm: attrLocal(start, "vm")}
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -596,10 +597,14 @@ func applyPendingCell(ws *Worksheet, pc *pendingCell, sst []sstItem, styles *sty
 	}
 	hasFormula := pc.formula != "" || pc.fType == "array" || pc.fType == "shared" || pc.fType == "dataTable"
 	hasValue := pc.value != "" || pc.hasInline || pc.t == "b"
-	if !hasFormula && !hasValue && st == nil {
+	if !hasFormula && !hasValue && st == nil && pc.cm == "" && pc.vm == "" {
 		return
 	}
 	cell := ws.GetCell(pc.row, pc.col)
+	defer func() {
+		cell.cellMeta = pc.cm
+		cell.valueMeta = pc.vm
+	}()
 	if st != nil {
 		cell.Style = st
 	}
@@ -649,7 +654,7 @@ func applyPendingCell(ws *Worksheet, pc *pendingCell, sst []sstItem, styles *sty
 		cell.Value = pc.value
 		cell.Type = CellTypeError
 	case "str":
-		cell.SetValue(pc.value)
+		cell.SetValue(unescapeOOXMLText(pc.value))
 	case "d":
 		if t, ok := parseExcelDate(pc.value); ok {
 			cell.SetValue(t)
@@ -676,6 +681,9 @@ func applyCached(cell *Cell, pc *pendingCell, isDate bool, wb *Workbook) {
 	if pc.t == "str" || pc.t == "e" {
 		cell.cachedType = pc.t
 		cell.Value = pc.value
+		if pc.t == "str" {
+			cell.Value = unescapeOOXMLText(pc.value)
+		}
 		return
 	}
 	if pc.value == "" {
@@ -689,7 +697,7 @@ func applyCached(cell *Cell, pc *pendingCell, isDate bool, wb *Workbook) {
 		cell.Value = pc.value
 		cell.cachedType = "e"
 	case "str":
-		cell.Value = pc.value
+		cell.Value = unescapeOOXMLText(pc.value)
 		cell.cachedType = "str"
 	case "s":
 		cell.cachedType = "str"
@@ -704,7 +712,7 @@ func applyCached(cell *Cell, pc *pendingCell, isDate bool, wb *Workbook) {
 				cell.cachedType = "n"
 			}
 		} else if pc.value != "" {
-			cell.Value = pc.value
+			cell.Value = unescapeOOXMLText(pc.value)
 			cell.cachedType = "str"
 		}
 	}
@@ -1046,7 +1054,7 @@ func readComments(ws *Worksheet, pkg *ooxmlPackage) {
 					if err := readCharData(dec, &b, "author"); err != nil {
 						return
 					}
-					authors = append(authors, b.String())
+					authors = append(authors, unescapeOOXMLText(b.String()))
 				}
 			case "comment":
 				ref := attrLocal(t, "ref")
@@ -1098,7 +1106,7 @@ func readCommentText(dec *xml.Decoder) string {
 			}
 		}
 	}
-	return b.String()
+	return unescapeOOXMLText(b.String())
 }
 
 func dataTableFormula(r1, r2 string) string {

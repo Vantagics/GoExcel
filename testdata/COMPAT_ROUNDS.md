@@ -262,6 +262,50 @@ Verified on a North/South amount table:
 
 `make diffcheck` on r11 and on the full corpus (215 workbooks, including r11): **0 content defects**.
 
+## Round 12 — full pivot builder, and ExcelJS / xlsx-populate / rust_xlsxwriter
+
+### Pivot tables
+
+`Worksheet.AddPivotTable` is unchanged: one row field and a sum. `Worksheet.BuildPivotTable` adds the rest:
+
+- several row fields, column fields, and page/report filters (each filter is written above the table as the field name and `(All)`)
+- several data fields, each with its own aggregation: sum, count, countNums, average, max, min, product, stdDev, stdDevp, var, varp
+- a number format on a data field (`0`, `0.00`, `#,##0`, `#,##0.00`, `0%`, `0.00%`, `yyyy-mm-dd`)
+- date grouping (years, quarters, months, days) and numeric bins (`start` / `end` / `interval`)
+- subtotals and row/column grand totals, each optional
+- pivot field items, `rowItems`, and `colItems`, including `field x="-2"` when there is more than one data field
+
+Empty intersections are left blank. Group labels are stored in the cache records, so the sheet values are filled even when a reader ignores `fieldGroup`.
+
+Checked on a 5-row Region/Product/Channel table (`/tmp/full-pivot.xlsx` from `TestFullPivotBuilder`):
+
+- openpyxl `_pivots` names: `Full`, `ByMonth`, `Bins`. Grand sum `M18=55`, count `N18=5`, average `O18=11`, Store `C18=25`, Web `H18=30`. Date groups: Nov 8, Dec 12, Jan 15, Feb 20. Bins of Qty: 0–9 = 7, 10–19 = 4, 20–29 = 1.
+- POI `getPivotTables()` returns those three names. `Full` has location `A10:Q18`, 5 data fields, and 1 page field.
+- LibreOffice Calc 24.2 converts the package. Its compact refresh matches the ungrouped totals (Store 25, Web 30, North 35, grand sum 55, count 5, min 5) and shows the Year filter as `- all -`. It does not apply `fieldGroup`: the date pivot lists the source datetimes and the bin pivot lists the raw amounts, and both grand totals still match (55 and 12). It also drops average and max in that compact layout. Those are LibreOffice refresh limits. Excel itself is not installed here, so “opens without repair” is inferred from this package shape plus POI and openpyxl reading it.
+
+Page fields list every item and do not hide rows. Choosing one report-filter item is not implemented.
+
+### Samples
+
+`testdata/excel/r12/` (29 workbooks) from sources not used in earlier rounds:
+
+- ExcelJS (MIT) `spec/integration/data` and `test/data`: 1904 dates, a chart sheet, comments, formulas with `_xlfn.CONCAT`, images, many columns, shared-string `_x005F_` escapes, and the Fibonacci sheet. `huge.xlsx` (1,400,014 cells, 14MB) is `testdata/perf/ej-huge.xlsx` so LibreOffice is not asked to recalc it.
+- xlsx-populate (MIT): rich text and styles.
+- rust_xlsxwriter (MIT) `tests/input`: array formulas, form-control buttons, comments, dynamic arrays (`_xlfn.UNIQUE` plus `cm` and `xl/metadata.xml`), an image in a cell (`vm` plus `xl/richData`), classic icon sets, an x14 icon set, VML, and ignore-error flags. The upstream x14 icon-set workbook omitted a space in `<calcPr …"fullCalcOnLoad`; the copy in this tree inserts that space so POI and LibreOffice can open it. The x14 data bar, threaded comment, and custom XML parts are small packages written to the OOXML shape those features use, because the new sources did not ship a permissive fixture for them.
+- XlsxWriter (BSD) `xw-large.xlsx`: 4,000 rows with a formula every 100 rows, for a mid-size sheet inside the differential run.
+
+SheetJS `test_files` returned HTTP 403, and the public SheetJS tree that was reachable had no `.xlsx` files. Current EPPlus is Polyform Noncommercial and was not vendored. LibreOffice bug-tracker attachments were skipped where the license was not Apache, MIT, BSD, or MPL.
+
+### Defects fixed from this corpus
+
+- Shared strings decode Excel `_xHHHH_` escapes. The literal text `_x000D_` is stored as `_x005F_x000D_` and read back as `_x000D_`. Characters XML 1.0 forbids are stored the same way instead of being stripped, so `a\x01b\x00c` round-trips.
+- `xl/metadata.xml`, `cm`, and `vm` round-trip, so dynamic-array anchors and rich-data cells keep their metadata indexes.
+- `xl/richData/` round-trips with the workbook relationships that point at it.
+- Package relationships in `_rels/.rels` other than the three standard ones are kept, so `customXml/item1.xml` survives a save.
+- Threaded comments and the person list were already copied as package parts; the round-12 fixtures lock that in.
+
+`python3 scripts/diffharness.py --roundtrip` on r12: **29 files, 0 content defects**. The same check on the full corpus (244 workbooks, including r12): **0 content defects**. `go test ./...` passes. Opening `testdata/perf/ej-huge.xlsx` reads 1,400,014 cells in about 7.7s and about 1080MB of heap.
+
 ## Remaining known gaps
 
 - openpyxl and POI do not read strict OOXML (POI bug 57699). goexcel reads it and can write it when asked. LibreOffice Calc opens a strict file written by goexcel.
@@ -271,6 +315,9 @@ Verified on a North/South amount table:
 - openpyxl warns that it does not support sparkline or slicer-list extensions and would drop them if it saved the file. goexcel preserves and writes them. LibreOffice's converter keeps a new pivot cache and drops the slicer parts on export.
 - msoffcrypto-tool 6.1.0 does not decrypt binary RC4 or RC4 CryptoAPI. It also cannot decrypt its own encrypt of a package under the 4096-byte mini-stream cutoff. goexcel pads Agile packages so both msoffcrypto and POI decrypt them.
 - Extensible encryption is an external cipher provider. It is not implemented.
-- Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells.
-- `AddPivotTable` builds one row field and one summed data field from a worksheet range. Column fields, filters, and grouping are not generated. `AddSlicer` attaches a slicer to a pivot created that way.
+- `BuildPivotTable` page fields show every item (`(All)`). They do not hide source rows for a single selected item. LibreOffice's refresh ignores pivot `fieldGroup`, so date and numeric groups stay as the precomputed cache labels in goexcel and become the base values after a LibreOffice recalc. Average and max can disappear in LibreOffice's compact layout.
+- A cell image is preserved (`vm` plus `xl/richData`) and is not a first-class Go value. Threaded comments are preserved as package parts and are not exposed on `Cell` next to notes.
+- LibreOffice 24.2 reports `#NAME?` for `_xlfn.UNIQUE` and recalculates some cached formula results (the 4,000-row sheet's cached `0` becomes the computed total). Those are recalc gaps. openpyxl still refuses a workbook whose relationship points at a missing `xl/sharedStrings.xml`.
+- `testdata/perf/ej-huge.xlsx` is outside `make diffcheck`. The reader holds the sheet in memory (about 1080MB for 1.4 million cells).
+- Dialog sheets and chartsheets are kept and reattached with their original relationship types. They have no grid cells. `AddSlicer` still attaches a slicer to a pivot created with `AddPivotTable` or `BuildPivotTable`.
 

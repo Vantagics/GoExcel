@@ -78,6 +78,8 @@ type PivotDataField struct {
 	Name       string
 	FieldIndex int
 	FieldName  string
+	Subtotal   string // sum, count, average, max, min, product, countNums, stdDev, stdDevp, var, varp
+	NumFmt     string
 }
 
 // PivotTable is the layout of one pivot table. Name, DataCaption, Location,
@@ -685,6 +687,7 @@ func parsePivotTable(data []byte) *PivotTable {
 				p.DataFields = append(p.DataFields, PivotDataField{
 					Name:       attrLocal(t, "name"),
 					FieldIndex: atoiString(attrLocal(t, "fld")),
+					Subtotal:   attrLocal(t, "subtotal"),
 				})
 			}
 		case xml.EndElement:

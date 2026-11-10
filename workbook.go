@@ -46,6 +46,7 @@ type Workbook struct {
 	preserved      []rawXML
 	styleExtras    styleExtras
 	workbookRels   []relationship
+	packageRels    []relationship
 }
 
 // New creates a new workbook with a single default worksheet.
@@ -288,6 +289,8 @@ func (wb *Workbook) CopySheet(srcIndex int, newTitle string) (*Worksheet, error)
 			col:         cell.col,
 			formulaRef:  cell.formulaRef,
 			arrayAnchor: cell.arrayAnchor,
+			cellMeta:    cell.cellMeta,
+			valueMeta:   cell.valueMeta,
 			sheet:       dst,
 		}
 		if cell.Style != nil {

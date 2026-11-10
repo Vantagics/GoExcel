@@ -107,6 +107,11 @@ func (r *XLSXReader) readPackage(reader io.ReaderAt, size int64) (*Workbook, err
 		return nil, fmt.Errorf("reading workbook rels: %w", fmt.Errorf("parsing workbook.xml.rels: %w", err))
 	}
 	wb.workbookRels = rels
+	if data, ok := pkg.file("_rels/.rels"); ok {
+		if pkgRels, err := parseRelationships(data); err == nil {
+			wb.packageRels = pkgRels
+		}
+	}
 	if err := parseWorkbook(wbData, wb); err != nil {
 		return nil, fmt.Errorf("reading workbook: %w", err)
 	}
@@ -280,12 +285,13 @@ func parseStringItem(dec *xml.Decoder, theme []string) (sstItem, error) {
 			case "t":
 				inT = false
 			case "si", "is":
-				item := sstItem{text: plain.String()}
+				item := sstItem{text: unescapeOOXMLText(plain.String())}
 				if sawR {
-					item.rich = &RichText{Runs: runs}
-					if item.text == "" {
-						item.text = item.rich.PlainText()
+					for i := range runs {
+						runs[i].Text = unescapeOOXMLText(runs[i].Text)
 					}
+					item.rich = &RichText{Runs: runs}
+					item.text = item.rich.PlainText()
 				}
 				return item, nil
 			}
